@@ -1,0 +1,3 @@
+# El .exe se publica en Releases, no en el repo.
+*.exe
+brillo.ico
