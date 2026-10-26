@@ -1,4 +1,4 @@
-﻿# Compila LGBrillo.exe con el compilador de C# que trae Windows (.NET Framework 4.x).
+﻿# Builds LGBrillo.exe with the C# compiler that ships with Windows (.NET Framework 4.x).
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"

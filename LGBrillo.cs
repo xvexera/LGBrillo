@@ -1,5 +1,5 @@
-// LGBrillo: controla el brillo de un monitor LG con webOS por la red (SSAP).
-// Ícono en la bandeja con un slider, y atajos Ctrl+Alt+Arriba / Ctrl+Alt+Abajo.
+// LGBrillo: controls the brightness of an LG webOS monitor over the network (SSAP).
+// Tray icon with a slider, plus Ctrl+Alt+Up / Ctrl+Alt+Down shortcuts.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -51,12 +51,12 @@ class Config {
     public bool PixelRefresh { get; set; }
     public string Name { get; set; }
     public double OsdSegundos { get; set; }
-    public string OsdPos { get; set; }   // "abajo", "arriba" o "arriba-der"
-    public string Color { get; set; }    // color de la barra, "#RRGGBB"
+    public string OsdPos { get; set; }   // "abajo" (bottom), "arriba" (top) or "arriba-der" (top right)
+    public string Color { get; set; }    // bar color, "#RRGGBB"
     public bool HideScreenOff { get; set; }
     public bool HideSleep { get; set; }
     public bool HidePlan { get; set; }
-    public int UpMods { get; set; }      // atajos: Alt=1, Ctrl=2, Shift=4, Win=8
+    public int UpMods { get; set; }      // shortcuts: Alt=1, Ctrl=2, Shift=4, Win=8
     public int UpKey { get; set; }
     public int DownMods { get; set; }
     public int DownKey { get; set; }
@@ -90,7 +90,7 @@ class Config {
     }
 }
 
-// Conexión SSAP (wss://ip:3001) con el monitor.
+// SSAP connection (wss://ip:3001) to the monitor.
 class Tv {
     const string LunaSet = "luna://com.webos.settingsservice/setSystemSettings";
 
@@ -146,7 +146,7 @@ class Tv {
         if (s != null) { try { s.Abort(); } catch { } s.Dispose(); }
     }
 
-    // Corta la conexión y avisa, para que la app reconecte.
+    // Drops the connection and reports it, so the app reconnects.
     void Drop() {
         var s = ws;
         if (s != null) { try { s.Abort(); } catch { } }
@@ -221,7 +221,7 @@ class Tv {
         }
     }
 
-    // La respuesta "PROMPT" llega también con una llave válida; solo avisamos si el registro se demora.
+    // The "PROMPT" response also arrives with a valid key; only warn if registration takes a while.
     async void PromptLater() {
         var reg = regTcs;
         await Task.Delay(1500);
@@ -271,7 +271,7 @@ class Tv {
         return list;
     }
 
-    // "HDMI_2" -> "HDMI 2", "DisplayPort_1" -> "DisplayPort", "USB-C_1" -> "USB-C". (El monitor les pone a todas la etiqueta "PC".)
+    // "HDMI_2" -> "HDMI 2", "DisplayPort_1" -> "DisplayPort", "USB-C_1" -> "USB-C". (The monitor labels them all "PC".)
     static string InputName(string id) {
         int u = id.LastIndexOf('_');
         if (u < 0) return id;
@@ -288,13 +288,13 @@ class Tv {
         return Request("ssap://tv/switchInput", new Dictionary<string, object> { { "inputId", id } });
     }
 
-    // setSystemSettings no está abierto por SSAP: se llama a luna a través de una alerta que se cierra al instante.
+    // setSystemSettings isn't open over SSAP: luna is called through an alert that closes instantly.
     public Task SetBacklight(int v) { return SetSetting("picture", "backlight", v); }
 
-    // Eye Care (luz azul reducida). Por SSAP no se puede leer, solo escribir.
+    // Eye Care (low blue light). It can't be read over SSAP, only written.
     public Task SetEyeCare(bool on) { return SetSetting("picture", "eyeComfortMode", on ? "on" : "off"); }
 
-    // Pixel Refresh (limpieza de píxeles del OLED) la próxima vez que se apague. Tampoco se puede leer.
+    // Pixel Refresh (OLED pixel cleaning) the next time it turns off. It can't be read either.
     public Task SetPixelRefresh(bool on) { return SetSetting("picture", "scheduledPixelCleaning", on ? "on" : "off"); }
 
     async Task SetSetting(string category, string key, object value) {
@@ -312,7 +312,7 @@ class Tv {
             await Request("ssap://system.notifications/closeAlert", new Dictionary<string, object> { { "alertId", aid } });
     }
 
-    // Busca un equipo webOS en la red por SSDP; devuelve su IP o null.
+    // Finds a webOS device on the network via SSDP; returns its IP or null.
     public static Task<string> Discover() {
         return Task.Run(() => {
             byte[] msg = Encoding.ASCII.GetBytes(
@@ -348,7 +348,7 @@ class Tv {
     }
 }
 
-// Manifiesto público de la app "LG Remote App" que aceptan los equipos webOS.
+// Public manifest of the "LG Remote App" that webOS devices accept.
 static class Manifest {
     public static Dictionary<string, object> Get() {
         return new Dictionary<string, object> {
@@ -386,7 +386,7 @@ static class Manifest {
     }
 }
 
-// Textos en español si Windows está en español; si no, en inglés.
+// Spanish text when Windows is in Spanish; English otherwise.
 static class L {
     public static bool Es = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "es";
     public static string T(string es, string en) { return Es ? es : en; }
@@ -409,7 +409,7 @@ static class Ui {
 
     [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int val, int size);
 
-    // Esquinas redondeadas de Windows 11 (en Windows 10 queda cuadrado).
+    // Windows 11 rounded corners (square on Windows 10).
     public static void Round(Form f) {
         try { int pref = 2; DwmSetWindowAttribute(f.Handle, 33, ref pref, 4); } catch { }
     }
@@ -417,11 +417,11 @@ static class Ui {
     [StructLayout(LayoutKind.Sequential)] struct Margins { public int L, R, T, B; }
     [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref Margins m);
 
-    // Fondo nativo de Windows 11 (2 = Mica, 3 = Acrylic). Devuelve false si Windows no lo soporta.
+    // Native Windows 11 backdrop (2 = Mica, 3 = Acrylic). Returns false if Windows doesn't support it.
     public static bool Backdrop(Form f, int type, bool extend) {
         try {
             int on = 1;
-            DwmSetWindowAttribute(f.Handle, 20, ref on, 4); // modo oscuro
+            DwmSetWindowAttribute(f.Handle, 20, ref on, 4); // dark mode
             if (extend) { var m = new Margins { L = -1, R = -1, T = -1, B = -1 }; DwmExtendFrameIntoClientArea(f.Handle, ref m); }
             return Environment.OSVersion.Version.Build >= 22621 && DwmSetWindowAttribute(f.Handle, 38, ref type, 4) == 0;
         } catch { return false; }
@@ -429,7 +429,7 @@ static class Ui {
 
     static readonly System.Collections.Generic.HashSet<string> families = new System.Collections.Generic.HashSet<string>();
 
-    // Usa Segoe UI Variable (la de Windows 11) si está; si no, Segoe UI.
+    // Uses Segoe UI Variable (the Windows 11 font) when available; Segoe UI otherwise.
     public static Font F(string win11, string fallback, float size, FontStyle st) {
         if (families.Count == 0)
             using (var fc = new InstalledFontCollection())
@@ -460,7 +460,7 @@ static class Ui {
         return b;
     }
 
-    // Escribe un .ico con cuadros PNG para el ícono del .exe.
+    // Writes a .ico with PNG frames for the .exe icon.
     public static void MakeIcon(string path) {
         int[] sizes = { 16, 20, 24, 32, 40, 48, 64, 256 };
         var pngs = new List<byte[]>();
@@ -480,7 +480,7 @@ static class Ui {
         }
     }
 
-    // Vidrio esmerilado oscuro: foto de lo que hay detrás de la ventana, desenfocada y oscurecida.
+    // Dark frosted glass: a picture of what's behind the window, blurred and darkened.
     public static Bitmap Frost(Rectangle r) {
         var outB = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb);
         using (var shot = new Bitmap(r.Width, r.Height, PixelFormat.Format32bppArgb)) {
@@ -525,7 +525,7 @@ static class Ui {
         return p;
     }
 
-    // Fila de brillo: sol chico, barra fina con relleno de color, perilla blanca y sol grande.
+    // Brightness row: small sun, thin bar with a colored fill, white knob and big sun.
     const float KnobW = 26, KnobH = 17;
 
     public static RectangleF TrackOf(RectangleF row) {
@@ -564,7 +564,7 @@ static class Ui {
         using (var path = Capsule(k)) using (var b = new SolidBrush(Color.FromArgb(242, 242, 245))) g.FillPath(b, path);
     }
 
-    // Íconos de los botones redondos y de las filas.
+    // Icons for the round buttons and the rows.
     public static void IconEye(Graphics g, PointF c, float s, Color col) {
         var r = new RectangleF(c.X - s / 2, c.Y - s * 0.3f, s, s * 0.6f);
         float cy = c.Y;
@@ -588,7 +588,7 @@ static class Ui {
                 }
     }
 
-    // Pantalla con una flecha que entra: para el botón de entrada de video.
+    // A screen with an incoming arrow: for the video input button.
     public static void IconInput(Graphics g, PointF c, float s, Color col) {
         float w = s, h = s * 0.68f, lw = Math.Max(1.4f, s * 0.09f);
         var r = new RectangleF(c.X - w / 2, c.Y - h / 2 - s * 0.06f, w, h);
@@ -617,7 +617,7 @@ static class Ui {
             g.DrawLines(p, new[] { new PointF(c.X - s * 0.25f, c.Y - s * 0.5f), new PointF(c.X + s * 0.25f, c.Y), new PointF(c.X - s * 0.25f, c.Y + s * 0.5f) });
     }
 
-    // Texto suavizado (GDI+ con antialias), centrado en vertical y con "…" si no entra.
+    // Smooth text (GDI+ antialiasing), vertically centered, with "…" when it doesn't fit.
     public static void DrawText(Graphics g, string s, Font f, RectangleF r, Color c, StringAlignment h) {
         using (var sf = new StringFormat(StringFormat.GenericTypographic) {
             Alignment = h, LineAlignment = StringAlignment.Center,
@@ -637,7 +637,7 @@ static class Ui {
     }
 }
 
-// Panel oscuro esmerilado con una fila de brillo; base del panel de la bandeja y del cartel de los atajos.
+// Dark frosted panel with a brightness row; base of the tray panel and the shortcut bar.
 abstract class DarkPanel : Form {
     protected Bitmap frost;
     protected int value = -1;
@@ -667,21 +667,21 @@ abstract class DarkPanel : Form {
     protected virtual void ItemHover(Point p) { }
     protected virtual void ItemClick(Point p) { }
 
-    // Avanza las animaciones; devuelve false cuando todo llegó.
+    // Steps the animations; returns false when they're all done.
     protected virtual bool Animate() {
         float goal = drag ? 1f : (hoverSlider ? 0.5f : 0f);
         grow = Ui.Toward(grow, goal, 0.25f);
         return grow != goal;
     }
 
-    // Windows 11 dibuja el desenfoque Acrylic de verdad; en Windows 10 se imita con una foto desenfocada.
+    // Windows 11 draws real Acrylic blur; on Windows 10 it's imitated with a blurred picture.
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
         Ui.Round(this);
         acrylic = Ui.Backdrop(this, 3, true);
     }
 
-    // Sin Acrylic, saca la foto del fondo antes de aparecer, así la ventana no sale en ella.
+    // Without Acrylic, takes the background picture before showing, so the window isn't in it.
     protected void ShowFrosted(Point at) {
         Location = at;
         if (!IsHandleCreated) CreateHandle();
@@ -744,7 +744,7 @@ abstract class DarkPanel : Form {
     protected void PaintSlider(Graphics g) { Ui.SliderRow(g, SliderRow, value, grow); }
 }
 
-// Panel que se abre al hacer clic en el ícono de la bandeja.
+// Panel that opens when you click the tray icon.
 class Popup : DarkPanel {
     static readonly string[] Labels = { "Eye Care", "Pixel Refresh", L.T("Entrada", "Input") };
     readonly bool[] on = new bool[3];
@@ -764,7 +764,7 @@ class Popup : DarkPanel {
     }
 
     protected override CreateParams CreateParams {
-        get { var cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; } // WS_EX_TOOLWINDOW: fuera de Alt+Tab
+        get { var cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; } // WS_EX_TOOLWINDOW: not in Alt+Tab
     }
 
     int W { get { return ClientSize.Width; } }
@@ -781,11 +781,11 @@ class Popup : DarkPanel {
         return new RectangleF(col.X + (col.Width - d) / 2, col.Y + Ui.P(4), d, d);
     }
 
-    readonly bool[] rows = { true, true, true }; // apagar pantalla, suspender, plan
+    readonly bool[] rows = { true, true, true }; // turn off display, sleep, power plan
 
     bool RowOn(int item) { return rows[item - RowScreen]; }
 
-    // Filas de abajo, una debajo de la otra según cuáles estén visibles.
+    // Bottom rows, stacked according to which ones are visible.
     float RowY(int item) {
         int n = 0;
         if (item != RowScreen && rows[0]) n++;
@@ -814,7 +814,7 @@ class Popup : DarkPanel {
     public void SetHdr(bool v) { hdr = v; Invalidate(); }
     public void SetInput(string name) { input = name; Invalidate(); }
 
-    // Muestra un menú debajo de un botón o de una fila, sin que el panel se cierre mientras está abierto.
+    // Shows a menu under a button or row, keeping the panel open while the menu is open.
     public void ShowMenu(int i, ContextMenuStrip m) {
         MenuOpen = true;
         m.Closed += delegate {
@@ -936,7 +936,7 @@ class Popup : DarkPanel {
     }
 }
 
-// Cartel de brillo al usar los atajos: misma fila de brillo, se puede arrastrar con el mouse. No roba el foco.
+// Brightness bar shown by the shortcuts: same brightness row, draggable with the mouse. Doesn't steal focus.
 class Osd : DarkPanel {
     public double Seconds = 1.5;
     public string Position = "abajo";
@@ -945,7 +945,7 @@ class Osd : DarkPanel {
     public Osd() {
         ClientSize = new Size(Ui.P(340), Ui.P(56));
         hide.Tick += delegate {
-            if (drag || Bounds.Contains(Cursor.Position)) return; // espera mientras el mouse está encima
+            if (drag || Bounds.Contains(Cursor.Position)) return; // wait while the mouse is over it
             hide.Stop();
             Hide();
         };
@@ -986,7 +986,7 @@ class Osd : DarkPanel {
     protected override void OnPaint(PaintEventArgs e) { PaintSlider(e.Graphics); }
 }
 
-// Muestras de color para la barra.
+// Color swatches for the bar.
 class Swatches : Control {
     public static readonly string[] Colors = { "#0A84FF", "#64D2FF", "#30D158", "#FFD60A", "#FF9F0A", "#FF375F", "#BF5AF2", "#F2F2F7" };
     public string Value = Colors[0];
@@ -1036,7 +1036,7 @@ class SettingsForm : Form {
     int y;
 
     public bool Startup { get { return startup.Checked; } }
-    public event Action<bool> Saved; // true si cambió la IP
+    public event Action<bool> Saved; // true if the IP changed
 
     public SettingsForm(Config cfg, bool isStartup) {
         this.cfg = cfg;
@@ -1184,11 +1184,11 @@ class SettingsForm : Form {
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
         Ui.DarkTitle(this);
-        Ui.Backdrop(this, 2, false); // Mica en la barra de título
+        Ui.Backdrop(this, 2, false); // Mica on the title bar
     }
 }
 
-// Tiempos de inactividad del plan de energía activo de Windows (en segundos, 0 = nunca).
+// Inactivity timeouts of the active Windows power plan (in seconds, 0 = never).
 static class Power {
     public static readonly Guid SubVideo = new Guid("7516b95f-f776-4464-8c53-06167f40cc99");
     public static readonly Guid VideoIdle = new Guid("3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e");
@@ -1211,7 +1211,7 @@ static class Power {
         return true;
     }
 
-    // Valor con la PC enchufada; -1 si no se pudo leer.
+    // Value when plugged in; -1 if it couldn't be read.
     public static int Get(Guid sub, Guid setting) {
         Guid s;
         uint v;
@@ -1219,7 +1219,7 @@ static class Power {
         return (int)v;
     }
 
-    // Lo escribe para enchufada y batería, y reactiva el plan para que Windows lo aplique ya.
+    // Writes it for plugged in and battery, and re-applies the plan so Windows uses it right away.
     public static bool Set(Guid sub, Guid setting, int seconds) {
         Guid s;
         if (!Active(out s)) return false;
@@ -1228,7 +1228,7 @@ static class Power {
         return ok == 0 && PowerSetActiveScheme(IntPtr.Zero, ref s) == 0;
     }
 
-    // Opciones de los menús: "Nunca" arriba de todo.
+    // Menu options: "Never" at the top.
     public static readonly int[] Times = { 0, 60, 120, 180, 300, 600, 900, 1200, 1800, 2700, 3600, 7200, 10800, 18000 };
 
     public static string Name(int s) {
@@ -1239,14 +1239,14 @@ static class Power {
         return s + " s";
     }
 
-    // La página "Editar la configuración del plan" del Panel de control.
+    // The Control Panel "Edit Plan Settings" page.
     public static void OpenPlanSettings() {
         try { System.Diagnostics.Process.Start("control.exe", "/name Microsoft.PowerOptions /page pagePlanSettings"); }
         catch { System.Diagnostics.Process.Start("control.exe", "powercfg.cpl"); }
     }
 }
 
-// HDR de Windows ("color avanzado") en alguna pantalla activa.
+// Windows HDR ("advanced color") on any active display.
 static class Hdr {
     [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
     [StructLayout(LayoutKind.Sequential)] struct PathSource { public Luid Adapter; public uint Id, ModeIdx, Status; }
@@ -1298,7 +1298,7 @@ class DarkMenuColors : ProfessionalColorTable {
     public override Color CheckPressedBackground { get { return Sel; } }
 }
 
-// Campo que captura una combinación de teclas (con al menos un modificador, o una tecla F).
+// Field that captures a key combination (with at least one modifier, or an F key).
 class HotkeyBox : TextBox {
     [DllImport("user32.dll")] static extern short GetKeyState(int key);
     public int Mods;
@@ -1344,7 +1344,7 @@ class HotkeyBox : TextBox {
         if ((keyData & Keys.Shift) != 0) m |= 4;
         if (GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0) m |= 8;
         bool fkey = k >= Keys.F1 && k <= Keys.F24;
-        if ((m & ~4) == 0 && !fkey) { System.Media.SystemSounds.Beep.Play(); return true; } // hace falta Ctrl, Alt o Win
+        if ((m & ~4) == 0 && !fkey) { System.Media.SystemSounds.Beep.Play(); return true; } // needs Ctrl, Alt or Win
         Set(m, k);
         return true;
     }
@@ -1477,7 +1477,7 @@ class App : ApplicationContext {
 
     void TogglePopup() {
         if (popup.Visible) { popup.Hide(); return; }
-        if (unchecked(Environment.TickCount - popup.HiddenAt) < 250) return; // el clic que lo cerró
+        if (unchecked(Environment.TickCount - popup.HiddenAt) < 250) return; // the click that closed it
         popup.SetHdr(Hdr.Enabled());
         RefreshTimes();
         popup.ShowNear(Cursor.Position);
@@ -1531,7 +1531,7 @@ class App : ApplicationContext {
         if (!applying) Apply();
     }
 
-    // Manda siempre el último valor pedido; los intermedios se saltean mientras hay uno en vuelo.
+    // Always sends the latest requested value; values in between are skipped while one is in flight.
     async void Apply() {
         applying = true;
         try {
@@ -1588,7 +1588,7 @@ class App : ApplicationContext {
         popup.SetTimes(Power.Name(Power.Get(Power.SubVideo, Power.VideoIdle)), Power.Name(Power.Get(Power.SubSleep, Power.StandbyIdle)));
     }
 
-    // Menú con los tiempos de inactividad de Windows; marca el actual (y lo agrega si no está en la lista).
+    // Menu with the Windows inactivity timeouts; checks the current one (and adds it if it isn't listed).
     void ShowTimeMenu(int row, Guid sub, Guid setting) {
         int current = Power.Get(sub, setting);
         var times = new List<int>(Power.Times);
@@ -1609,7 +1609,7 @@ class App : ApplicationContext {
         popup.ShowMenu(row, m);
     }
 
-    // 0 = Eye Care, 1 = Pixel Refresh (los dos en el monitor), 2 = entrada de video; filas de energía de Windows.
+    // 0 = Eye Care, 1 = Pixel Refresh (both on the monitor), 2 = video input; Windows power rows.
     async void OnButton(int i) {
         if (i == 2) { ShowInputMenu(); return; }
         if (i == Popup.RowScreen) { ShowTimeMenu(i, Power.SubVideo, Power.VideoIdle); return; }
@@ -1660,7 +1660,7 @@ class App : ApplicationContext {
     }
 
     void OnReconnected() {
-        // Si el monitor estuvo apagado un rato, el Pixel Refresh programado ya corrió.
+        // If the monitor was off for a while, the scheduled Pixel Refresh already ran.
         if (cfg.PixelRefresh && lostAt != DateTime.MinValue && DateTime.UtcNow - lostAt > TimeSpan.FromMinutes(2)) {
             cfg.PixelRefresh = false;
             cfg.Save();
