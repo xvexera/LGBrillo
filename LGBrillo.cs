@@ -53,8 +53,16 @@ class Config {
     public double OsdSegundos { get; set; }
     public string OsdPos { get; set; }   // "abajo", "arriba" o "arriba-der"
     public string Color { get; set; }    // color de la barra, "#RRGGBB"
+    public bool HideScreenOff { get; set; }
+    public bool HideSleep { get; set; }
+    public bool HidePlan { get; set; }
+    public int UpMods { get; set; }      // atajos: Alt=1, Ctrl=2, Shift=4, Win=8
+    public int UpKey { get; set; }
+    public int DownMods { get; set; }
+    public int DownKey { get; set; }
 
-    public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF"; }
+    public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF";
+        UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down; }
 
     static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LGBrillo"); } }
     static string FilePath { get { return Path.Combine(Dir, "config.json"); } }
@@ -69,6 +77,7 @@ class Config {
             if (c.OsdSegundos < 0.5 || c.OsdSegundos > 10) c.OsdSegundos = 1.5;
             if (c.OsdPos != "arriba" && c.OsdPos != "arriba-der") c.OsdPos = "abajo";
             if (string.IsNullOrEmpty(c.Color)) c.Color = "#0A84FF";
+            if (c.UpKey == 0 || c.DownKey == 0) { c.UpMods = 3; c.UpKey = (int)Keys.Up; c.DownMods = 3; c.DownKey = (int)Keys.Down; }
             return c;
         } catch { return new Config(); }
     }
@@ -405,6 +414,29 @@ static class Ui {
         try { int pref = 2; DwmSetWindowAttribute(f.Handle, 33, ref pref, 4); } catch { }
     }
 
+    [StructLayout(LayoutKind.Sequential)] struct Margins { public int L, R, T, B; }
+    [DllImport("dwmapi.dll")] static extern int DwmExtendFrameIntoClientArea(IntPtr h, ref Margins m);
+
+    // Fondo nativo de Windows 11 (2 = Mica, 3 = Acrylic). Devuelve false si Windows no lo soporta.
+    public static bool Backdrop(Form f, int type, bool extend) {
+        try {
+            int on = 1;
+            DwmSetWindowAttribute(f.Handle, 20, ref on, 4); // modo oscuro
+            if (extend) { var m = new Margins { L = -1, R = -1, T = -1, B = -1 }; DwmExtendFrameIntoClientArea(f.Handle, ref m); }
+            return Environment.OSVersion.Version.Build >= 22621 && DwmSetWindowAttribute(f.Handle, 38, ref type, 4) == 0;
+        } catch { return false; }
+    }
+
+    static readonly System.Collections.Generic.HashSet<string> families = new System.Collections.Generic.HashSet<string>();
+
+    // Usa Segoe UI Variable (la de Windows 11) si está; si no, Segoe UI.
+    public static Font F(string win11, string fallback, float size, FontStyle st) {
+        if (families.Count == 0)
+            using (var fc = new InstalledFontCollection())
+                foreach (var fam in fc.Families) families.Add(fam.Name);
+        return new Font(families.Contains(win11) ? win11 : fallback, size, st);
+    }
+
     public static void DarkTitle(Form f) {
         try { int on = 1; DwmSetWindowAttribute(f.Handle, 20, ref on, 4); } catch { }
     }
@@ -594,6 +626,11 @@ static class Ui {
             g.DrawString(s, f, b, r, sf);
     }
 
+    public static void ChevronDown(Graphics g, PointF c, float s, Color col) {
+        using (var p = new Pen(col, Math.Max(1.4f, 1.6f * S)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            g.DrawLines(p, new[] { new PointF(c.X - s * 0.5f, c.Y - s * 0.22f), new PointF(c.X, c.Y + s * 0.25f), new PointF(c.X + s * 0.5f, c.Y - s * 0.22f) });
+    }
+
     public static float Toward(float cur, float goal, float k) {
         float n = cur + (goal - cur) * k;
         return Math.Abs(goal - n) < 0.002f ? goal : n;
@@ -607,11 +644,12 @@ abstract class DarkPanel : Form {
     protected bool drag, hoverSlider;
     protected float grow;
     protected readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
-    protected readonly Font fTitle = new Font("Segoe UI Semibold", 11f);
-    protected readonly Font fLabel = new Font("Segoe UI Semibold", 9f);
-    protected readonly Font fText = new Font("Segoe UI", 10f);
-    protected readonly Font fSmall = new Font("Segoe UI", 8.5f);
-    protected readonly Font fBadge = new Font("Segoe UI", 7f, FontStyle.Bold);
+    protected bool acrylic;
+    protected readonly Font fTitle = Ui.F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 11f, FontStyle.Regular);
+    protected readonly Font fLabel = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9f, FontStyle.Regular);
+    protected readonly Font fText = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
+    protected readonly Font fSmall = Ui.F("Segoe UI Variable Small", "Segoe UI", 8.5f, FontStyle.Regular);
+    protected readonly Font fBadge = Ui.F("Segoe UI Variable Small Semibol", "Segoe UI", 7f, FontStyle.Bold);
     public event Action<int> SliderMoved;
 
     protected DarkPanel() {
@@ -620,7 +658,7 @@ abstract class DarkPanel : Form {
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None;
-        BackColor = Color.FromArgb(30, 30, 32);
+        BackColor = Color.Black;
         DoubleBuffered = true;
         anim.Tick += delegate { if (!Animate()) anim.Stop(); Invalidate(); };
     }
@@ -636,20 +674,33 @@ abstract class DarkPanel : Form {
         return grow != goal;
     }
 
-    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Ui.Round(this); }
+    // Windows 11 dibuja el desenfoque Acrylic de verdad; en Windows 10 se imita con una foto desenfocada.
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        Ui.Round(this);
+        acrylic = Ui.Backdrop(this, 3, true);
+    }
 
-    // Saca la foto del fondo antes de aparecer, así la ventana no sale en ella.
+    // Sin Acrylic, saca la foto del fondo antes de aparecer, así la ventana no sale en ella.
     protected void ShowFrosted(Point at) {
         Location = at;
-        if (frost != null) frost.Dispose();
-        frost = Ui.Frost(new Rectangle(at, Size));
+        if (!IsHandleCreated) CreateHandle();
+        if (!acrylic) {
+            if (frost != null) frost.Dispose();
+            frost = Ui.Frost(new Rectangle(at, Size));
+        }
         Show();
         Invalidate();
     }
 
     protected override void OnPaintBackground(PaintEventArgs e) {
-        if (frost != null) e.Graphics.DrawImageUnscaled(frost, 0, 0);
-        else base.OnPaintBackground(e);
+        if (frost != null) { e.Graphics.DrawImageUnscaled(frost, 0, 0); return; }
+        if (acrylic) {
+            e.Graphics.Clear(Color.Transparent);
+            using (var b = new SolidBrush(Color.FromArgb(150, 24, 24, 26))) e.Graphics.FillRectangle(b, ClientRectangle);
+            return;
+        }
+        using (var b = new SolidBrush(Color.FromArgb(30, 30, 32))) e.Graphics.FillRectangle(b, ClientRectangle);
     }
 
     public void SetValue(int v) {
@@ -699,13 +750,15 @@ class Popup : DarkPanel {
     readonly bool[] on = new bool[3];
     int hot = -1;
     string title = L.T("Monitor LG", "LG monitor"), sub = "", status = L.T("Conectando…", "Connecting…"), input = "—";
+    string screenOff = "—", sleep = "—";
+    public const int RowScreen = 10, RowSleep = 11, RowPlan = 12;
     bool connected, hdr;
     public int HiddenAt;
     public event Action<int> ButtonClicked;
     public bool MenuOpen;
 
     public Popup() {
-        ClientSize = new Size(Ui.P(300), Ui.P(204));
+        ClientSize = new Size(Ui.P(300), Ui.P(318));
         KeyPreview = true;
         Deactivate += delegate { if (MenuOpen) return; Hide(); HiddenAt = Environment.TickCount; };
     }
@@ -728,22 +781,53 @@ class Popup : DarkPanel {
         return new RectangleF(col.X + (col.Width - d) / 2, col.Y + Ui.P(4), d, d);
     }
 
+    readonly bool[] rows = { true, true, true }; // apagar pantalla, suspender, plan
+
+    bool RowOn(int item) { return rows[item - RowScreen]; }
+
+    // Filas de abajo, una debajo de la otra según cuáles estén visibles.
+    float RowY(int item) {
+        int n = 0;
+        if (item != RowScreen && rows[0]) n++;
+        if (item == RowPlan && rows[1]) n++;
+        return 206 + 36 * n + (item == RowPlan && n > 0 ? 4 : 0);
+    }
+
+    RectangleF Row(int item) {
+        return new RectangleF(Ui.P(8), Ui.P(RowY(item)), W - Ui.P(16), Ui.P(item == RowPlan ? 30 : 34));
+    }
+
+    public void SetRows(bool screen, bool sl, bool plan) {
+        rows[0] = screen; rows[1] = sl; rows[2] = plan;
+        float bottom = 198;
+        foreach (int r in new[] { RowScreen, RowSleep, RowPlan })
+            if (RowOn(r)) bottom = RowY(r) + (r == RowPlan ? 30 : 34) + 6;
+        ClientSize = new Size(ClientSize.Width, Ui.P(bottom));
+        Invalidate();
+    }
+
     public bool IsOn(int i) { return on[i]; }
+    public void SetTimes(string screen, string sl) { screenOff = screen; sleep = sl; Invalidate(); }
     public void SetButton(int i, bool v) { on[i] = v; Invalidate(); }
     public void SetTitle(string t, string s) { title = t; sub = s; Invalidate(); }
     public void SetStatus(string s, bool ok) { status = s; connected = ok; Invalidate(); }
     public void SetHdr(bool v) { hdr = v; Invalidate(); }
     public void SetInput(string name) { input = name; Invalidate(); }
 
-    // Muestra el menú de entradas debajo del botón, sin que el panel se cierre mientras está abierto.
+    // Muestra un menú debajo de un botón o de una fila, sin que el panel se cierre mientras está abierto.
     public void ShowMenu(int i, ContextMenuStrip m) {
         MenuOpen = true;
         m.Closed += delegate {
             MenuOpen = false;
             if (Form.ActiveForm != this) { Hide(); HiddenAt = Environment.TickCount; }
         };
-        var c = Circle(i);
-        m.Show(this, new Point((int)c.X - Ui.P(20), (int)c.Bottom + Ui.P(6)));
+        if (i < Labels.Length) {
+            var c = Circle(i);
+            m.Show(this, new Point((int)c.X - Ui.P(20), (int)c.Bottom + Ui.P(6)));
+        } else {
+            var r = Row(i);
+            m.Show(this, new Point((int)r.Right - m.GetPreferredSize(Size.Empty).Width, (int)r.Bottom + Ui.P(2)));
+        }
     }
 
     public void ShowNear(Point p) {
@@ -757,6 +841,7 @@ class Popup : DarkPanel {
 
     int Hit(Point p) {
         for (int i = 0; i < Labels.Length; i++) if (Column(i).Contains(p)) return i;
+        foreach (int r in new[] { RowScreen, RowSleep, RowPlan }) if (RowOn(r) && Row(r).Contains(p)) return r;
         return -1;
     }
 
@@ -826,6 +911,28 @@ class Popup : DarkPanel {
             Ui.DrawText(g, st, fSmall, new RectangleF(col.X, c.Bottom + Ui.P(22), col.Width, Ui.P(16)), Ui.Text2, StringAlignment.Center);
         }
 
+        using (var p = new Pen(Ui.Line, 1)) {
+            if (rows[0] || rows[1] || rows[2]) g.DrawLine(p, pad, Ui.P(200), W - pad, Ui.P(200));
+            if (rows[2] && (rows[0] || rows[1])) g.DrawLine(p, pad, Ui.P(RowY(RowPlan) - 3), W - pad, Ui.P(RowY(RowPlan) - 3));
+        }
+        foreach (int item in new[] { RowScreen, RowSleep, RowPlan }) {
+            if (!RowOn(item)) continue;
+            var r = Row(item);
+            if (hot == item)
+                using (var path = Ui.RoundRect(r, Ui.P(8)))
+                using (var b = new SolidBrush(Color.FromArgb(20, 255, 255, 255)))
+                    g.FillPath(b, path);
+            var txt = new RectangleF(r.X + Ui.P(10), r.Y, r.Width * 0.6f, r.Height);
+            float cx = r.Right - Ui.P(16), cy = r.Y + r.Height / 2;
+            if (item == RowPlan) {
+                Ui.DrawText(g, L.T("Editar plan de energía", "Edit power plan"), fText, txt, Ui.Text2, StringAlignment.Near);
+                Ui.Chevron(g, new PointF(cx, cy), Ui.P(8), Ui.Text2);
+                continue;
+            }
+            Ui.DrawText(g, item == RowScreen ? L.T("Apagar pantalla", "Turn off display") : L.T("Suspender PC", "Sleep PC"), fText, txt, Ui.Text, StringAlignment.Near);
+            Ui.DrawText(g, item == RowScreen ? screenOff : sleep, fSmall, new RectangleF(r.X, r.Y, r.Width - Ui.P(32), r.Height), Ui.Text2, StringAlignment.Far);
+            Ui.ChevronDown(g, new PointF(cx, cy), Ui.P(8), Ui.Text2);
+        }
     }
 }
 
@@ -922,7 +1029,8 @@ class SettingsForm : Form {
     readonly NumericUpDown secs = new NumericUpDown(), step = new NumericUpDown();
     readonly ComboBox pos = new ComboBox();
     readonly Swatches colors = new Swatches();
-    readonly CheckBox startup = new CheckBox();
+    readonly CheckBox startup = new CheckBox(), showScreen = new CheckBox(), showSleep = new CheckBox(), showPlan = new CheckBox();
+    readonly HotkeyBox keyUp = new HotkeyBox(), keyDown = new HotkeyBox();
     readonly TextBox ip = new TextBox();
     readonly Button find = new Button(), save = new Button(), cancel = new Button();
     int y;
@@ -940,7 +1048,7 @@ class SettingsForm : Form {
         AutoScaleMode = AutoScaleMode.None;
         BackColor = Bg;
         ForeColor = Ui.Text;
-        Font = new Font("Segoe UI", 10f);
+        Font = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
         ClientSize = new Size(Ui.P(460), Ui.P(392));
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
@@ -956,7 +1064,11 @@ class SettingsForm : Form {
         AddRow(L.T("Posición del cartel", "On-screen bar position"), pos, Ui.P(190));
 
         step.Minimum = 1; step.Maximum = 20; step.Value = Math.Max(1, Math.Min(20, cfg.Paso));
-        AddRow(L.T("Paso de Ctrl+Alt+↑ / ↓", "Ctrl+Alt+↑ / ↓ step"), step, Ui.P(90));
+        keyUp.Set(cfg.UpMods, (Keys)cfg.UpKey);
+        keyDown.Set(cfg.DownMods, (Keys)cfg.DownKey);
+        AddRow(L.T("Atajo para subir el brillo", "Brightness up shortcut"), keyUp, Ui.P(190));
+        AddRow(L.T("Atajo para bajar el brillo", "Brightness down shortcut"), keyDown, Ui.P(190));
+        AddRow(L.T("Paso de los atajos", "Shortcut step"), step, Ui.P(90));
 
         colors.Value = cfg.Color;
         colors.BackColor = Bg;
@@ -971,6 +1083,24 @@ class SettingsForm : Form {
         ipBox.Controls.Add(ip);
         ipBox.Controls.Add(find);
         AddRow(L.T("IP del monitor", "Monitor IP"), ipBox, Ui.P(216));
+
+        var head = new Label { Text = L.T("Mostrar en el panel", "Show in the panel"), AutoSize = true, ForeColor = Ui.Text2 };
+        head.Location = new Point(Ui.P(22), y - Ui.P(4));
+        Controls.Add(head);
+        y += Ui.P(22);
+        int cx = Ui.P(22);
+        foreach (var t in new[] {
+            Tuple.Create(showScreen, L.T("Apagar pantalla", "Turn off display"), !cfg.HideScreenOff),
+            Tuple.Create(showSleep, L.T("Suspender PC", "Sleep PC"), !cfg.HideSleep),
+            Tuple.Create(showPlan, L.T("Plan de energía", "Power plan"), !cfg.HidePlan) }) {
+            t.Item1.Text = t.Item2;
+            t.Item1.Checked = t.Item3;
+            t.Item1.AutoSize = true;
+            t.Item1.Location = new Point(cx, y);
+            Controls.Add(t.Item1);
+            cx += t.Item1.PreferredSize.Width + Ui.P(14);
+        }
+        y += Ui.P(40);
 
         startup.Text = L.T("Iniciar con Windows", "Start with Windows");
         startup.Checked = isStartup;
@@ -991,8 +1121,10 @@ class SettingsForm : Form {
         AcceptButton = save;
         CancelButton = cancel;
 
-        foreach (Control c in new Control[] { secs, step, pos, ip }) { c.BackColor = Field; c.ForeColor = Ui.Text; }
+        foreach (Control c in new Control[] { secs, step, pos, ip, keyUp, keyDown }) { c.BackColor = Field; c.ForeColor = Ui.Text; }
         ip.BorderStyle = BorderStyle.FixedSingle;
+        keyUp.BorderStyle = BorderStyle.FixedSingle;
+        keyDown.BorderStyle = BorderStyle.FixedSingle;
         secs.BorderStyle = BorderStyle.FixedSingle;
         step.BorderStyle = BorderStyle.FixedSingle;
 
@@ -1006,6 +1138,10 @@ class SettingsForm : Form {
         };
         cancel.Click += delegate { Close(); };
         save.Click += delegate {
+            if (keyUp.Mods == keyDown.Mods && keyUp.Key == keyDown.Key) {
+                MessageBox.Show(this, L.T("Los dos atajos no pueden ser iguales.", "The two shortcuts can't be the same."), "LGBrillo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             string newIp = ip.Text.Trim();
             bool ipChanged = newIp != cfg.Ip;
             cfg.OsdSegundos = (double)secs.Value;
@@ -1013,6 +1149,11 @@ class SettingsForm : Form {
             cfg.Paso = (int)step.Value;
             cfg.Color = colors.Value;
             cfg.Ip = newIp;
+            cfg.UpMods = keyUp.Mods; cfg.UpKey = (int)keyUp.Key;
+            cfg.DownMods = keyDown.Mods; cfg.DownKey = (int)keyDown.Key;
+            cfg.HideScreenOff = !showScreen.Checked;
+            cfg.HideSleep = !showSleep.Checked;
+            cfg.HidePlan = !showPlan.Checked;
             cfg.Save();
             if (Saved != null) Saved(ipChanged);
             Close();
@@ -1040,7 +1181,69 @@ class SettingsForm : Form {
         b.Cursor = Cursors.Hand;
     }
 
-    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); Ui.DarkTitle(this); }
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        Ui.DarkTitle(this);
+        Ui.Backdrop(this, 2, false); // Mica en la barra de título
+    }
+}
+
+// Tiempos de inactividad del plan de energía activo de Windows (en segundos, 0 = nunca).
+static class Power {
+    public static readonly Guid SubVideo = new Guid("7516b95f-f776-4464-8c53-06167f40cc99");
+    public static readonly Guid VideoIdle = new Guid("3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e");
+    public static readonly Guid SubSleep = new Guid("238c9fa8-0aad-41ed-83f4-97be242c8f20");
+    public static readonly Guid StandbyIdle = new Guid("29f6c1db-86da-48c5-9fdb-f2b67b1f44da");
+
+    [DllImport("powrprof.dll")] static extern uint PowerGetActiveScheme(IntPtr root, out IntPtr scheme);
+    [DllImport("powrprof.dll")] static extern uint PowerReadACValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, out uint value);
+    [DllImport("powrprof.dll")] static extern uint PowerWriteACValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, uint value);
+    [DllImport("powrprof.dll")] static extern uint PowerWriteDCValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, uint value);
+    [DllImport("powrprof.dll")] static extern uint PowerSetActiveScheme(IntPtr root, ref Guid scheme);
+    [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+
+    static bool Active(out Guid scheme) {
+        scheme = Guid.Empty;
+        IntPtr p;
+        if (PowerGetActiveScheme(IntPtr.Zero, out p) != 0) return false;
+        scheme = (Guid)Marshal.PtrToStructure(p, typeof(Guid));
+        LocalFree(p);
+        return true;
+    }
+
+    // Valor con la PC enchufada; -1 si no se pudo leer.
+    public static int Get(Guid sub, Guid setting) {
+        Guid s;
+        uint v;
+        if (!Active(out s) || PowerReadACValueIndex(IntPtr.Zero, ref s, ref sub, ref setting, out v) != 0) return -1;
+        return (int)v;
+    }
+
+    // Lo escribe para enchufada y batería, y reactiva el plan para que Windows lo aplique ya.
+    public static bool Set(Guid sub, Guid setting, int seconds) {
+        Guid s;
+        if (!Active(out s)) return false;
+        uint ok = PowerWriteACValueIndex(IntPtr.Zero, ref s, ref sub, ref setting, (uint)seconds);
+        PowerWriteDCValueIndex(IntPtr.Zero, ref s, ref sub, ref setting, (uint)seconds);
+        return ok == 0 && PowerSetActiveScheme(IntPtr.Zero, ref s) == 0;
+    }
+
+    // Opciones de los menús: "Nunca" arriba de todo.
+    public static readonly int[] Times = { 0, 60, 120, 180, 300, 600, 900, 1200, 1800, 2700, 3600, 7200, 10800, 18000 };
+
+    public static string Name(int s) {
+        if (s < 0) return "—";
+        if (s == 0) return L.T("Nunca", "Never");
+        if (s % 3600 == 0) return s / 3600 + " h";
+        if (s % 60 == 0) return s / 60 + " min";
+        return s + " s";
+    }
+
+    // La página "Editar la configuración del plan" del Panel de control.
+    public static void OpenPlanSettings() {
+        try { System.Diagnostics.Process.Start("control.exe", "/name Microsoft.PowerOptions /page pagePlanSettings"); }
+        catch { System.Diagnostics.Process.Start("control.exe", "powercfg.cpl"); }
+    }
 }
 
 // HDR de Windows ("color avanzado") en alguna pantalla activa.
@@ -1095,6 +1298,58 @@ class DarkMenuColors : ProfessionalColorTable {
     public override Color CheckPressedBackground { get { return Sel; } }
 }
 
+// Campo que captura una combinación de teclas (con al menos un modificador, o una tecla F).
+class HotkeyBox : TextBox {
+    [DllImport("user32.dll")] static extern short GetKeyState(int key);
+    public int Mods;
+    public Keys Key;
+
+    public HotkeyBox() { ReadOnly = true; ShortcutsEnabled = false; Cursor = Cursors.Hand; TextAlign = HorizontalAlignment.Center; }
+
+    public void Set(int mods, Keys k) { Mods = mods; Key = k; Text = Describe(mods, k); }
+
+    public static string Describe(int m, Keys k) {
+        var parts = new List<string>();
+        if ((m & 8) != 0) parts.Add("Win");
+        if ((m & 2) != 0) parts.Add("Ctrl");
+        if ((m & 1) != 0) parts.Add("Alt");
+        if ((m & 4) != 0) parts.Add("Shift");
+        string name;
+        switch (k) {
+            case Keys.Up: name = "↑"; break;
+            case Keys.Down: name = "↓"; break;
+            case Keys.Left: name = "←"; break;
+            case Keys.Right: name = "→"; break;
+            case Keys.PageUp: name = "RePág"; break;
+            case Keys.PageDown: name = "AvPág"; break;
+            case Keys.Oemplus: name = "+"; break;
+            case Keys.OemMinus: name = "-"; break;
+            case Keys.Add: name = "Num +"; break;
+            case Keys.Subtract: name = "Num -"; break;
+            default:
+                name = k >= Keys.D0 && k <= Keys.D9 ? ((char)('0' + (k - Keys.D0))).ToString() : k.ToString();
+                break;
+        }
+        if (k == Keys.PageUp || k == Keys.PageDown) name = L.T(name, k == Keys.PageUp ? "PgUp" : "PgDn");
+        parts.Add(name);
+        return string.Join(" + ", parts.ToArray());
+    }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
+        Keys k = keyData & Keys.KeyCode;
+        if (k == Keys.ControlKey || k == Keys.ShiftKey || k == Keys.Menu || k == Keys.LWin || k == Keys.RWin) return true;
+        int m = 0;
+        if ((keyData & Keys.Control) != 0) m |= 2;
+        if ((keyData & Keys.Alt) != 0) m |= 1;
+        if ((keyData & Keys.Shift) != 0) m |= 4;
+        if (GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0) m |= 8;
+        bool fkey = k >= Keys.F1 && k <= Keys.F24;
+        if ((m & ~4) == 0 && !fkey) { System.Media.SystemSounds.Beep.Play(); return true; } // hace falta Ctrl, Alt o Win
+        Set(m, k);
+        return true;
+    }
+}
+
 class Hotkeys : NativeWindow {
     [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr h, int id, uint mod, uint vk);
     [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr h, int id);
@@ -1103,6 +1358,11 @@ class Hotkeys : NativeWindow {
     public event Action<int> Pressed;
 
     public Hotkeys() { CreateHandle(new CreateParams()); }
+
+    public void Clear() {
+        foreach (int id in ids) UnregisterHotKey(Handle, id);
+        ids.Clear();
+    }
 
     public bool Add(int id, uint mod, Keys k) {
         if (!RegisterHotKey(Handle, id, mod, (uint)k)) return false;
@@ -1148,6 +1408,7 @@ class App : ApplicationContext {
         popup.SetTitle(cfg.Name == "" ? L.T("Monitor LG", "LG monitor") : cfg.Name, Resolution());
         popup.SetButton(0, cfg.EyeCare);
         popup.SetButton(1, cfg.PixelRefresh);
+        RefreshTimes();
         popup.SetHdr(Hdr.Enabled());
         SystemEvents.DisplaySettingsChanged += delegate { popup.SetHdr(Hdr.Enabled()); };
         popup.SliderMoved += v => Want(v, false);
@@ -1162,16 +1423,26 @@ class App : ApplicationContext {
         };
 
         hk.Pressed += id => Step(id == 1 ? cfg.Paso : -cfg.Paso);
-        bool ok = hk.Add(1, Hotkeys.Ctrl | Hotkeys.Alt, Keys.Up);
-        ok &= hk.Add(2, Hotkeys.Ctrl | Hotkeys.Alt, Keys.Down);
-        if (!ok) tray.ShowBalloonTip(8000, L.T("Brillo del monitor", "Monitor brightness"), L.T("Otro programa ya usa Ctrl+Alt+↑/↓. El panel sigue funcionando.", "Another app already uses Ctrl+Alt+↑/↓. The panel still works."), ToolTipIcon.Warning);
+        RegisterHotkeys();
 
         retry.Tick += async delegate { if (!tv.Connected) await EnsureConnected(); };
         retry.Start();
         var _ = EnsureConnected();
     }
 
+    void RegisterHotkeys() {
+        hk.Clear();
+        bool ok = hk.Add(1, (uint)cfg.UpMods, (Keys)cfg.UpKey);
+        ok &= hk.Add(2, (uint)cfg.DownMods, (Keys)cfg.DownKey);
+        if (!ok) {
+            string keys = HotkeyBox.Describe(cfg.UpMods, (Keys)cfg.UpKey) + " / " + HotkeyBox.Describe(cfg.DownMods, (Keys)cfg.DownKey);
+            tray.ShowBalloonTip(8000, L.T("Brillo del monitor", "Monitor brightness"),
+                L.T("Otro programa ya usa ", "Another app already uses ") + keys + L.T(". Elegí otro atajo en Configuración.", ". Pick another shortcut in Settings."), ToolTipIcon.Warning);
+        }
+    }
+
     void ApplyConfig() {
+        popup.SetRows(!cfg.HideScreenOff, !cfg.HideSleep, !cfg.HidePlan);
         Ui.Accent = Ui.ParseColor(cfg.Color);
         osd.Seconds = cfg.OsdSegundos;
         osd.Position = cfg.OsdPos;
@@ -1208,6 +1479,7 @@ class App : ApplicationContext {
         if (popup.Visible) { popup.Hide(); return; }
         if (unchecked(Environment.TickCount - popup.HiddenAt) < 250) return; // el clic que lo cerró
         popup.SetHdr(Hdr.Enabled());
+        RefreshTimes();
         popup.ShowNear(Cursor.Position);
         if (!tv.Connected) { var _ = EnsureConnected(); }
         else RefreshInput();
@@ -1221,6 +1493,7 @@ class App : ApplicationContext {
         f.Saved += ipChanged => {
             SetStartup(f.Startup);
             ApplyConfig();
+            RegisterHotkeys();
             if (ipChanged) { tv.Close(); var _ = EnsureConnected(); }
         };
         f.Show();
@@ -1311,9 +1584,37 @@ class App : ApplicationContext {
         popup.ShowMenu(2, m);
     }
 
-    // 0 = Eye Care, 1 = Pixel Refresh (los dos en el monitor), 2 = entrada de video.
+    void RefreshTimes() {
+        popup.SetTimes(Power.Name(Power.Get(Power.SubVideo, Power.VideoIdle)), Power.Name(Power.Get(Power.SubSleep, Power.StandbyIdle)));
+    }
+
+    // Menú con los tiempos de inactividad de Windows; marca el actual (y lo agrega si no está en la lista).
+    void ShowTimeMenu(int row, Guid sub, Guid setting) {
+        int current = Power.Get(sub, setting);
+        var times = new List<int>(Power.Times);
+        if (current > 0 && !times.Contains(current)) { times.Add(current); times.Sort(); }
+        var m = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors()), ShowCheckMargin = true, ShowImageMargin = false };
+        foreach (int s in times) {
+            var it = new ToolStripMenuItem(Power.Name(s)) { Checked = s == current, ForeColor = Ui.Text };
+            int v = s;
+            it.Click += delegate {
+                if (!Power.Set(sub, setting, v))
+                    tray.ShowBalloonTip(5000, "LGBrillo", L.T("Windows no dejó cambiar ese tiempo.", "Windows did not allow changing that time."), ToolTipIcon.Warning);
+                RefreshTimes();
+            };
+            m.Items.Add(it);
+            if (s == 0) m.Items.Add(new ToolStripSeparator());
+        }
+        m.Closed += delegate { m.BeginInvoke((Action)m.Dispose); };
+        popup.ShowMenu(row, m);
+    }
+
+    // 0 = Eye Care, 1 = Pixel Refresh (los dos en el monitor), 2 = entrada de video; filas de energía de Windows.
     async void OnButton(int i) {
         if (i == 2) { ShowInputMenu(); return; }
+        if (i == Popup.RowScreen) { ShowTimeMenu(i, Power.SubVideo, Power.VideoIdle); return; }
+        if (i == Popup.RowSleep) { ShowTimeMenu(i, Power.SubSleep, Power.StandbyIdle); return; }
+        if (i == Popup.RowPlan) { popup.Hide(); Power.OpenPlanSettings(); return; }
         bool want = !popup.IsOn(i);
         popup.SetButton(i, want);
         string error = null;

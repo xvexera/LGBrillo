@@ -9,13 +9,15 @@ Los monitores LG con webOS (como la línea UltraGear OLED "Smart" o los MyView) 
 
 ## Qué hace
 
-- **Brillo** con una barra en la bandeja de Windows, o con **Ctrl+Alt+↑ / ↓** desde cualquier programa.
+- **Brillo** con una barra en la bandeja de Windows, o con un atajo de teclado desde cualquier programa (por defecto **Ctrl+Alt+↑ / ↓**, y lo podés cambiar).
 - **Cartel al usar los atajos**, que también se puede arrastrar con el mouse.
 - **Eye Care** (luz azul reducida del monitor).
 - **Pixel Refresh**: le pide al monitor OLED que limpie los píxeles la próxima vez que se apague.
 - **Entrada de video**: cambia entre DisplayPort, HDMI, USB‑C, etc.
 - **Aviso de HDR**: te muestra si Windows tiene el HDR activo (el brillo se guarda por separado en cada modo de imagen).
-- **Configuración** (clic derecho en el ícono): duración y posición del cartel, paso de los atajos, color de la barra, IP del monitor e iniciar con Windows.
+- **Inactividad de Windows**: elegí cuándo se apaga la pantalla y cuándo se suspende la PC ("Nunca" arriba de todo), con acceso directo a "Editar plan de energía".
+- **Diseño nativo de Windows 11**: desenfoque Acrylic y Mica de verdad, y la fuente Segoe UI Variable. En Windows 10 el desenfoque se imita.
+- **Configuración** (clic derecho en el ícono): atajos de teclado, duración y posición del cartel, paso de los atajos, color de la barra, qué filas mostrar en el panel, IP del monitor e iniciar con Windows.
 
 | Cartel de los atajos | Configuración |
 |---|---|
@@ -91,12 +93,14 @@ LG monitors with webOS (UltraGear OLED "Smart" models, MyView) don't support DDC
 | ![Hotkey bar](docs/atajos-en.png) | ![Settings](docs/configuracion-en.png) |
 
 **Features:**
-- **Brightness** from a tray slider or **Ctrl+Alt+↑/↓**, with an on-screen bar you can drag with the mouse.
+- **Brightness** from a tray slider or a keyboard shortcut (**Ctrl+Alt+↑/↓** by default, customizable), with an on-screen bar you can drag with the mouse.
+- **Windows inactivity**: pick when the display turns off and when the PC sleeps ("Never" at the top), plus a shortcut to "Edit power plan".
+- **Native Windows 11 look**: real Acrylic and Mica backdrops and the Segoe UI Variable font (blur is imitated on Windows 10).
 - **Eye Care** (the monitor's low blue light mode).
 - **Pixel Refresh** the next time the monitor is turned off (OLED models).
 - **Video input** switching (DisplayPort, HDMI, USB-C).
 - **HDR indicator**: shows when Windows HDR is active.
-- **Settings** (right-click the tray icon): OSD duration and position, hotkey step, bar color, monitor IP and start with Windows.
+- **Settings** (right-click the tray icon): shortcuts, OSD duration and position, shortcut step, bar color, which rows the panel shows, monitor IP and start with Windows.
 
 **Setup:** download `LGBrillo.exe` from [Releases](../../releases), make sure the monitor is on and on the same network, run it, and accept the pairing prompt on the monitor with the remote (only once). The app shows English, or Spanish when Windows is set to Spanish.
 
