@@ -20,6 +20,11 @@ using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+[assembly: System.Reflection.AssemblyTitle("LGBrillo")]
+[assembly: System.Reflection.AssemblyProduct("LGBrillo")]
+[assembly: System.Reflection.AssemblyVersion("1.2.0.0")]
+[assembly: System.Reflection.AssemblyFileVersion("1.2.0.0")]
+
 namespace LGBrillo {
 
 static class Program {
@@ -27,6 +32,9 @@ static class Program {
 
     [STAThread]
     static void Main(string[] args) {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (s, e) => Log.Write("UNHANDLED " + e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("FATAL " + e.ExceptionObject);
         SetProcessDPIAware();
         using (var g = Graphics.FromHwnd(IntPtr.Zero)) Ui.S = g.DpiX / 96f;
         if (args.Length == 2 && args[0] == "--make-icon") { Ui.MakeIcon(args[1]); return; }
@@ -38,8 +46,33 @@ static class Program {
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            Log.Write("start " + Application.ProductVersion + " on Windows build " + Environment.OSVersion.Version.Build);
             Application.Run(new App());
         }
+    }
+}
+
+// Small rolling log in %APPDATA%\LGBrillo\log.txt, to diagnose "it sometimes doesn't work". Never contains IP addresses.
+static class Log {
+    static readonly object gate = new object();
+    static readonly Regex ip = new Regex(@"\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b");
+
+    public static string FilePath {
+        get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LGBrillo", "log.txt"); }
+    }
+
+    public static void Write(string s) {
+        try {
+            lock (gate) {
+                var fi = new FileInfo(FilePath);
+                Directory.CreateDirectory(fi.DirectoryName);
+                if (fi.Exists && fi.Length > 256 * 1024) {
+                    File.Delete(FilePath + ".old");
+                    File.Move(FilePath, FilePath + ".old");
+                }
+                File.AppendAllText(FilePath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + ip.Replace(s, "<ip>") + "\r\n");
+            }
+        } catch { }
     }
 }
 
@@ -102,6 +135,7 @@ class Tv {
     TaskCompletionSource<string> regTcs;
     TaskCompletionSource<bool> firstValue;
     int nextId;
+    bool prompted;
 
     public string Ip = "";
     public string Key = "";
@@ -120,6 +154,7 @@ class Tv {
         ws = s;
         regTcs = new TaskCompletionSource<string>();
         firstValue = new TaskCompletionSource<bool>();
+        prompted = false;
         var loop = ReceiveLoop(s);
 
         var p = new Dictionary<string, object> {
@@ -128,8 +163,20 @@ class Tv {
         if (Key != "") p["client-key"] = Key;
         await Send(new Dictionary<string, object> { { "type", "register" }, { "id", "reg0" }, { "payload", p } });
 
+        // A paired monitor answers at once. Only wait a full minute while it is showing the pairing prompt;
+        // a monitor that is still booting accepts the socket but stays silent, and must not block us that long.
         var reg = regTcs.Task;
-        if (await Task.WhenAny(reg, Task.Delay(60000)) != reg) { Close(); throw new TimeoutException(L.T("no se aceptó el aviso en el monitor", "the prompt on the monitor was not accepted")); }
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (!reg.IsCompleted) {
+            bool pairing = Key == "" || prompted;
+            if (waited.ElapsedMilliseconds > (pairing ? 60000 : 6000)) {
+                Close();
+                throw new TimeoutException(pairing
+                    ? L.T("no se aceptó el aviso en el monitor", "the prompt on the monitor was not accepted")
+                    : L.T("el monitor no respondió", "the monitor did not respond"));
+            }
+            await Task.WhenAny(reg, Task.Delay(200));
+        }
         Key = await reg;
 
         await Send(new Dictionary<string, object> {
@@ -198,7 +245,7 @@ class Tv {
         if (id == "reg0") {
             if (type == "registered") regTcs.TrySetResult(Str(payload, "client-key"));
             else if (type == "error") regTcs.TrySetException(new Exception(L.T("el monitor rechazó la conexión", "the monitor rejected the connection")));
-            else if (Str(payload, "pairingType") == "PROMPT") PromptLater();
+            else if (Str(payload, "pairingType") == "PROMPT") { prompted = true; PromptLater(); }
             return;
         }
         if (id == "sub0") {
@@ -237,17 +284,38 @@ class Tv {
         finally { sendLock.Release(); }
     }
 
-    async Task<Dictionary<string, object>> Request(string uri, object payload) {
+    async Task<Dictionary<string, object>> Request(string uri, object payload, int timeoutMs = 5000) {
         string id = "r" + (++nextId);
         var tcs = new TaskCompletionSource<Dictionary<string, object>>();
         pend[id] = tcs;
-        await Send(new Dictionary<string, object> { { "type", "request" }, { "id", id }, { "uri", uri }, { "payload", payload } });
-        if (await Task.WhenAny(tcs.Task, Task.Delay(8000)) != tcs.Task) {
+        try { await Send(new Dictionary<string, object> { { "type", "request" }, { "id", id }, { "uri", uri }, { "payload", payload } }); }
+        catch { pend.Remove(id); Drop(); throw; }
+        if (await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs)) != tcs.Task) {
             pend.Remove(id);
             Drop();
             throw new TimeoutException(L.T("el monitor no respondió", "the monitor did not respond"));
         }
         return await tcs.Task;
+    }
+
+    // Asks for the brightness once, for when the subscription hasn't reported it. Returns -1 if it can't be read.
+    public async Task<int> GetBacklight() {
+        try {
+            var r = await Request("ssap://settings/getSystemSettings", new Dictionary<string, object> {
+                { "category", "picture" }, { "keys", new[] { "backlight" } } }, 3000);
+            object so, bo;
+            var st = r.TryGetValue("settings", out so) ? so as Dictionary<string, object> : null;
+            int v;
+            return st != null && st.TryGetValue("backlight", out bo) && int.TryParse(bo.ToString(), out v) ? v : -1;
+        } catch { return -1; }
+    }
+
+    // Quick round trip to find out whether the socket is still alive (it often isn't after the display sleeps).
+    public async Task<bool> Alive() {
+        try {
+            await Request("ssap://com.webos.applicationManager/getForegroundAppInfo", new Dictionary<string, object>(), 2500);
+            return true;
+        } catch { return false; }
     }
 
     public class Input { public string Id, AppId, Name; public bool Connected; }
@@ -441,6 +509,16 @@ static class Ui {
         try { int on = 1; DwmSetWindowAttribute(f.Handle, 20, ref on, 4); } catch { }
     }
 
+    static readonly Dictionary<long, Bitmap> suns = new Dictionary<long, Bitmap>();
+
+    // Shared bitmap for painting (don't dispose it): the bar repaints on every animation frame.
+    public static Bitmap SunCached(int n, Color color) {
+        long key = ((long)n << 32) | (uint)color.ToArgb();
+        Bitmap b;
+        if (!suns.TryGetValue(key, out b)) suns[key] = b = Sun(n, color);
+        return b;
+    }
+
     public static Bitmap Sun(int n, Color color) {
         var b = new Bitmap(n, n, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(b)) {
@@ -542,8 +620,8 @@ static class Ui {
     public static void SliderRow(Graphics g, RectangleF row, int val, float grow) {
         g.SmoothingMode = SmoothingMode.AntiAlias;
         int s1 = P(13), s2 = P(18);
-        using (var sun = Sun(s1, Color.FromArgb(150, 150, 156))) g.DrawImage(sun, row.X, row.Y + (row.Height - s1) / 2f);
-        using (var sun = Sun(s2, Color.FromArgb(205, 205, 210))) g.DrawImage(sun, row.Right - s2, row.Y + (row.Height - s2) / 2f);
+        g.DrawImage(SunCached(s1, Color.FromArgb(150, 150, 156)), row.X, row.Y + (row.Height - s1) / 2f);
+        g.DrawImage(SunCached(s2, Color.FromArgb(205, 205, 210)), row.Right - s2, row.Y + (row.Height - s2) / 2f);
         var t = TrackOf(row);
         using (var path = Capsule(t))
         using (var b = new SolidBrush(Color.FromArgb(46, 255, 255, 255)))
@@ -738,6 +816,22 @@ abstract class DarkPanel : Form {
     }
 
     protected override void OnMouseUp(MouseEventArgs e) { drag = false; anim.Start(); }
+
+    // Losing the mouse mid-drag (Alt+Tab, a system prompt) sends no mouse-up: without this the drag never ends.
+    protected override void OnMouseCaptureChanged(EventArgs e) {
+        base.OnMouseCaptureChanged(e);
+        if (drag && !Capture) { drag = false; anim.Start(); }
+    }
+
+    protected override void OnVisibleChanged(EventArgs e) {
+        base.OnVisibleChanged(e);
+        if (!Visible) { drag = false; hoverSlider = false; grow = 0; }
+    }
+
+    // Rebuilds the native window while hidden: after the display sleeps or changes mode, an old backdrop window can come back blank.
+    public void ResetWindow() {
+        if (IsHandleCreated && !Visible) RecreateHandle();
+    }
     protected override void OnMouseLeave(EventArgs e) { hoverSlider = false; anim.Start(); ItemHover(new Point(-1, -1)); }
     protected override void OnMouseWheel(MouseEventArgs e) { if (value >= 0) SlideTo(value + (e.Delta > 0 ? 2 : -2)); }
 
@@ -977,13 +1071,46 @@ class Osd : DarkPanel {
         hide.Start();
     }
 
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+
+    string message; // shown instead of the bar when there is no brightness to show
+    public bool ShowingMessage { get { return Visible && message != null; } }
+
     public void ShowValue(int v) {
+        message = null;
         SetValue(v);
-        if (!Visible) ShowFrosted(Where());
+        Present();
+    }
+
+    public void ShowMessage(string s) {
+        message = s;
+        Invalidate();
+        Present();
+    }
+
+    void Present() {
+        var at = Where();
+        if (!Visible) ShowFrosted(at);
+        else if (Location != at) Location = at;
+        // Back to the top of the always-on-top windows, without taking the focus.
+        SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040); // NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW
+        if (!IsWindowVisible(Handle)) Log.Write("osd: window is not visible after showing it, at " + at);
         Restart();
     }
 
-    protected override void OnPaint(PaintEventArgs e) { PaintSlider(e.Graphics); }
+    protected override void OnMouseDown(MouseEventArgs e) { if (message == null) base.OnMouseDown(e); }
+    protected override void OnMouseWheel(MouseEventArgs e) { if (message == null) base.OnMouseWheel(e); }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        if (message == null) { PaintSlider(e.Graphics); return; }
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        int s = Ui.P(18), pad = Ui.P(18);
+        g.DrawImage(Ui.SunCached(s, Color.FromArgb(150, 150, 156)), pad, (ClientSize.Height - s) / 2f);
+        Ui.DrawText(g, message, fText, new RectangleF(pad + s + Ui.P(12), 0, ClientSize.Width - 2 * pad - s - Ui.P(12), ClientSize.Height), Ui.Text, StringAlignment.Near);
+    }
 }
 
 // Color swatches for the bar.
@@ -1357,7 +1484,14 @@ class Hotkeys : NativeWindow {
     readonly List<int> ids = new List<int>();
     public event Action<int> Pressed;
 
-    public Hotkeys() { CreateHandle(new CreateParams()); }
+    [DllImport("user32.dll")] static extern IntPtr RegisterPowerSettingNotification(IntPtr h, ref Guid setting, int flags);
+    public event Action<bool> DisplayPower; // the display turned on (true) or off
+
+    public Hotkeys() {
+        CreateHandle(new CreateParams());
+        var consoleDisplayState = new Guid("6fe69556-704a-47a0-8f24-c28d936fda47");
+        try { RegisterPowerSettingNotification(Handle, ref consoleDisplayState, 0); } catch { }
+    }
 
     public void Clear() {
         foreach (int id in ids) UnregisterHotKey(Handle, id);
@@ -1377,6 +1511,9 @@ class Hotkeys : NativeWindow {
 
     protected override void WndProc(ref Message m) {
         if (m.Msg == 0x0312 && Pressed != null) Pressed(m.WParam.ToInt32()); // WM_HOTKEY
+        // WM_POWERBROADCAST / PBT_POWERSETTINGCHANGE: the state is the first data byte, after the GUID and the length.
+        if (m.Msg == 0x0218 && m.WParam.ToInt32() == 0x8013 && m.LParam != IntPtr.Zero && DisplayPower != null)
+            DisplayPower(Marshal.ReadInt32(m.LParam, 20) != 0);
         base.WndProc(ref m);
     }
 }
@@ -1394,7 +1531,10 @@ class App : ApplicationContext {
     int target = -1, applied = -1;
     bool applying, connecting;
     string lastError = "";
-    DateTime lostAt = DateTime.MinValue;
+    DateTime lostAt = DateTime.MinValue, lastSet = DateTime.MinValue, lastDiscover = DateTime.MinValue, fastUntil = DateTime.MinValue;
+    int pendingDelta;
+    bool stepWaiting, displayOn = true;
+    bool announce; // the pending change came from a shortcut: keep the on-screen bar informed until it is applied
     SettingsForm settings;
 
     public App() {
@@ -1410,13 +1550,20 @@ class App : ApplicationContext {
         popup.SetButton(1, cfg.PixelRefresh);
         RefreshTimes();
         popup.SetHdr(Hdr.Enabled());
-        SystemEvents.DisplaySettingsChanged += delegate { popup.SetHdr(Hdr.Enabled()); };
+        SystemEvents.DisplaySettingsChanged += delegate { popup.SetHdr(Hdr.Enabled()); osd.ResetWindow(); popup.ResetWindow(); };
+        SystemEvents.PowerModeChanged += (s, e) => { if (e.Mode == PowerModes.Resume) { Log.Write("pc resumed"); Wake(); } };
+        hk.DisplayPower += on => {
+            if (on == displayOn) return;
+            displayOn = on;
+            Log.Write(on ? "display on" : "display off");
+            if (on) Wake();
+        };
         popup.SliderMoved += v => Want(v, false);
         osd.SliderMoved += v => Want(v, false);
         popup.ButtonClicked += OnButton;
 
         tv.BacklightChanged += OnBacklight;
-        tv.Disconnected += delegate { lostAt = DateTime.UtcNow; SetStatus(L.T("Sin conexión, reintentando…", "Disconnected, retrying…"), false); };
+        tv.Disconnected += delegate { Log.Write("connection lost"); lostAt = DateTime.UtcNow; SetStatus(L.T("Sin conexión, reintentando…", "Disconnected, retrying…"), false); };
         tv.PairingPrompt += delegate {
             SetStatus(L.T("Aceptá el aviso en el monitor", "Accept the prompt on the monitor"), false);
             tray.ShowBalloonTip(15000, L.T("Brillo del monitor", "Monitor brightness"), L.T("Aceptá el aviso que apareció en el monitor (con el control remoto). Es una sola vez.", "Accept the prompt that appeared on the monitor (with the remote). Only needed once."), ToolTipIcon.Info);
@@ -1425,9 +1572,26 @@ class App : ApplicationContext {
         hk.Pressed += id => Step(id == 1 ? cfg.Paso : -cfg.Paso);
         RegisterHotkeys();
 
-        retry.Tick += async delegate { if (!tv.Connected) await EnsureConnected(); };
+        retry.Tick += async delegate {
+            retry.Interval = DateTime.UtcNow < fastUntil ? 3000 : 15000;
+            if (!tv.Connected) await EnsureConnected();
+        };
+        fastUntil = DateTime.UtcNow.AddSeconds(60); // at startup the network may not be up yet
+        retry.Interval = 3000;
         retry.Start();
         var _ = EnsureConnected();
+    }
+
+    // The display or the PC woke up: the old socket is usually dead and the monitor takes a while to come back.
+    // Check now and retry quickly for a minute, instead of finding out on the first key press.
+    async void Wake() {
+        osd.ResetWindow();
+        popup.ResetWindow();
+        fastUntil = DateTime.UtcNow.AddSeconds(60);
+        retry.Interval = 3000;
+        await Task.Delay(1000);
+        if (tv.Connected && !await tv.Alive()) Log.Write("connection was dead after waking up");
+        if (!tv.Connected) await EnsureConnected();
     }
 
     void RegisterHotkeys() {
@@ -1467,6 +1631,10 @@ class App : ApplicationContext {
             cfg.Ip = "";
             tv.Close();
             await EnsureConnected();
+        });
+        m.Items.Add(L.T("Abrir registro de diagnóstico", "Open diagnostic log"), null, delegate {
+            Log.Write("log opened from the menu");
+            try { System.Diagnostics.Process.Start("notepad.exe", "\"" + Log.FilePath + "\""); } catch { }
         });
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add(L.T("Salir", "Quit"), null, delegate { Quit(); });
@@ -1508,26 +1676,51 @@ class App : ApplicationContext {
         tray.Text = L.T("Brillo del monitor: ", "Monitor brightness: ") + v;
     }
 
+    // The monitor reports every change, including ours. While we are sending, and right after, those reports can be
+    // older than the value just requested: taking them would move the bar backwards and lose a key press.
     void OnBacklight(int v) {
+        if (applying) return;
+        if (v != target && (DateTime.UtcNow - lastSet).TotalMilliseconds < 800) return;
         applied = v;
-        if (!applying) { target = v; ShowValue(v); }
+        target = v;
+        ShowValue(v);
     }
 
+    // A shortcut was pressed. The on-screen bar always answers: with the new value, or with why there isn't one.
     async void Step(int delta) {
         int b = target >= 0 ? target : applied;
-        if (b < 0) {
-            if (!await EnsureConnected()) { tray.ShowBalloonTip(4000, L.T("Brillo del monitor", "Monitor brightness"), lastError, ToolTipIcon.Warning); return; }
-            b = applied;
-            if (b < 0) return;
+        if (b >= 0) {
+            Log.Write("hotkey " + delta.ToString("+0;-0") + " -> " + Math.Max(0, Math.Min(100, b + delta)) + (tv.Connected ? "" : " (not connected)"));
+            Want(b + delta, true);
+            return;
         }
-        Want(b + delta, true);
+        // The brightness isn't known yet (just started, or the monitor was off): say so, connect, then apply the presses.
+        pendingDelta += delta;
+        osd.ShowMessage(L.T("Conectando con el monitor…", "Connecting to the monitor…"));
+        if (stepWaiting) return;
+        stepWaiting = true;
+        Log.Write("hotkey " + delta.ToString("+0;-0") + " with unknown brightness, connecting");
+        try {
+            announce = true;
+            bool ok = await ConnectPatiently();
+            b = target >= 0 ? target : applied;
+            if (ok && b < 0) { // connected, but the monitor never reported its brightness: ask for it
+                b = await tv.GetBacklight();
+                if (b >= 0) { applied = b; target = b; }
+            }
+            if (ok && b >= 0) Want(b + pendingDelta, true);
+            else {
+                Log.Write("hotkey not applied: " + (ok ? "the monitor did not report its brightness" : lastError));
+                osd.ShowMessage(ok ? L.T("El monitor no informó su brillo", "The monitor didn't report its brightness") : Unreachable);
+            }
+        } finally { pendingDelta = 0; stepWaiting = false; if (!applying) announce = false; }
     }
 
     void Want(int v, bool fromHotkey) {
         v = Math.Max(0, Math.Min(100, v));
         target = v;
         ShowValue(v);
-        if (fromHotkey) osd.ShowValue(v);
+        if (fromHotkey) { announce = true; osd.ShowValue(v); }
         if (!applying) Apply();
     }
 
@@ -1536,12 +1729,43 @@ class App : ApplicationContext {
         applying = true;
         try {
             while (target >= 0 && target != applied) {
-                if (!await EnsureConnected()) break;
+                if (!await ConnectPatiently()) { NotApplied(); break; }
                 int v = target;
-                try { await tv.SetBacklight(v); applied = v; }
-                catch (Exception ex) { lastError = L.T("No se pudo cambiar: ", "Could not change it: ") + ex.Message; SetStatus(lastError, false); break; }
+                try {
+                    await tv.SetBacklight(v);
+                    applied = v;
+                    lastSet = DateTime.UtcNow;
+                    if (osd.ShowingMessage) osd.ShowValue(target); // it was saying "Connecting…"
+                }
+                catch (Exception ex) { lastError = L.T("No se pudo cambiar: ", "Could not change it: ") + ex.Message; NotApplied(); break; }
             }
-        } finally { applying = false; }
+        } finally { applying = false; announce = false; }
+    }
+
+    // Connects, insisting for a while: right after waking up, the monitor needs some seconds before it accepts connections.
+    // While a shortcut is waiting for it, the on-screen bar says so instead of showing a value that isn't applied yet.
+    async Task<bool> ConnectPatiently() {
+        var until = DateTime.UtcNow.AddSeconds(20);
+        while (!await EnsureConnected()) {
+            if (DateTime.UtcNow > until) return false;
+            if (announce) osd.ShowMessage(L.T("Conectando con el monitor…", "Connecting to the monitor…"));
+            await Task.Delay(1000);
+        }
+        return true;
+    }
+
+    static string Unreachable { get { return L.T("Sin conexión con el monitor", "Can't reach the monitor"); } }
+
+    // The change didn't reach the monitor: say why and go back to showing the brightness it really has.
+    void NotApplied() {
+        Log.Write("brightness " + target + " not applied: " + lastError);
+        SetStatus(lastError, false);
+        if (osd.Visible) osd.ShowMessage(Unreachable);
+        if (applied >= 0) {
+            target = applied;
+            popup.SetValue(applied);
+            tray.Text = L.T("Brillo del monitor: ", "Monitor brightness: ") + applied;
+        }
     }
 
     List<Tv.Input> inputs = new List<Tv.Input>();
@@ -1644,7 +1868,9 @@ class App : ApplicationContext {
         try {
             SetStatus(L.T("Conectando…", "Connecting…"), false);
             bool ok = cfg.Ip != "" && await TryConnect(cfg.Ip);
-            if (!ok) {
+            // Search the network when there is no address, and otherwise at most twice a minute (the quick retries would flood it).
+            if (!ok && (cfg.Ip == "" || (DateTime.UtcNow - lastDiscover).TotalSeconds > 30)) {
+                lastDiscover = DateTime.UtcNow;
                 SetStatus(L.T("Buscando el monitor en la red…", "Searching the network for the monitor…"), false);
                 string ip = await Tv.Discover();
                 if (ip == null) lastError = L.T("No encuentro el monitor (¿está prendido?)", "Monitor not found (is it on?)");
@@ -1653,6 +1879,7 @@ class App : ApplicationContext {
                     if (ok) { cfg.Ip = ip; cfg.Save(); }
                 }
             }
+            if (!ok && lastError == "") lastError = L.T("Sin conexión con el monitor", "Not connected to the monitor");
             SetStatus(ok ? L.T("Conectado", "Connected") : lastError, ok);
             if (ok) OnReconnected();
             return ok;
@@ -1667,6 +1894,7 @@ class App : ApplicationContext {
             popup.SetButton(1, false);
         }
         lostAt = DateTime.MinValue;
+        Log.Write("connected, brightness " + applied);
         if (cfg.Name == "") FetchName();
         RefreshInput();
     }
@@ -1692,7 +1920,9 @@ class App : ApplicationContext {
             if (tv.Key != cfg.Key) { cfg.Key = tv.Key; cfg.Save(); }
             return true;
         } catch (Exception ex) {
-            lastError = L.T("Sin conexión: ", "Not connected: ") + ex.Message;
+            string msg = L.T("Sin conexión: ", "Not connected: ") + ex.Message;
+            if (msg != lastError) Log.Write("connect failed: " + ex.Message);
+            lastError = msg;
             return false;
         }
     }

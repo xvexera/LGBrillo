@@ -53,7 +53,14 @@ Tried it on another model? Open an [issue](../../issues) with the model, the web
 
 - **Eye Care and Pixel Refresh can only be set over the network, not read.** The panel remembers your last choice. If you change them with the remote, the button may show the opposite state.
 - **Brightness per picture mode:** each mode (SDR, HDR, etc.) keeps its own brightness, and LGBrillo changes the one for the active mode.
+- **The on-screen bar can't draw over everything:** Windows keeps the Start menu, its own flyouts and exclusive-fullscreen games above any app window, so the bar stays hidden behind those. The brightness still changes.
 - **Possible flicker:** to change settings, the app opens and instantly closes an invisible alert on the monitor, which may flicker on some models.
+
+## Troubleshooting
+
+When you press a shortcut the on-screen bar always answers: with the new brightness, with "Connecting to the monitor…" while it reconnects (for example right after the display wakes up), or with "Can't reach the monitor".
+
+If something doesn't work, right-click the tray icon and choose **Open diagnostic log**. The log (`%APPDATA%\LGBrillo\log.txt`) records shortcuts, connections and errors, and never contains IP addresses, so it's safe to attach to an [issue](../../issues).
 
 ## Build it yourself
 
