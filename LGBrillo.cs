@@ -93,9 +93,26 @@ class Config {
     public int UpKey { get; set; }
     public int DownMods { get; set; }
     public int DownKey { get; set; }
+    public string Design { get; set; }   // "win11" or "glass"
+    public double GBlur { get; set; }
+    public double GDarken { get; set; }
+    public bool GRefract { get; set; }
+    public double GBezel { get; set; }
+    public bool GSpec { get; set; }
+    public double GSpecWidth { get; set; }
+    public double GSpecBright { get; set; }
+    public bool GRgbOn { get; set; }
+    public double GRgb { get; set; }
+    public double GRgbHue { get; set; }
+    public bool GRgbAnim { get; set; }
+    public double GRgbSpeed { get; set; }
+    public bool GLight { get; set; }
+    public string GWave { get; set; }    // "lenta", "normal" or "rapida"
 
     public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF";
-        UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down; }
+        UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down;
+        Design = "win11"; GBlur = 0.45; GDarken = 0.3; GRefract = true; GBezel = 0.45; GSpec = true; GSpecWidth = 0.4; GSpecBright = 1;
+        GRgbOn = true; GRgb = 0.35; GRgbHue = 0; GRgbAnim = false; GRgbSpeed = 0.4; GLight = true; GWave = "normal"; }
 
     static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LGBrillo"); } }
     static string FilePath { get { return Path.Combine(Dir, "config.json"); } }
@@ -110,6 +127,8 @@ class Config {
             if (c.OsdSegundos < 0.5 || c.OsdSegundos > 10) c.OsdSegundos = 1.5;
             if (c.OsdPos != "arriba" && c.OsdPos != "arriba-der") c.OsdPos = "abajo";
             if (string.IsNullOrEmpty(c.Color)) c.Color = "#0A84FF";
+            if (c.Design != "glass") c.Design = "win11";
+            if (c.GWave != "lenta" && c.GWave != "rapida") c.GWave = "normal";
             if (c.UpKey == 0 || c.DownKey == 0) { c.UpMods = 3; c.UpKey = (int)Keys.Up; c.DownMods = 3; c.DownKey = (int)Keys.Down; }
             return c;
         } catch { return new Config(); }
@@ -709,13 +728,492 @@ static class Ui {
             g.DrawLines(p, new[] { new PointF(c.X - s * 0.5f, c.Y - s * 0.22f), new PointF(c.X, c.Y + s * 0.25f), new PointF(c.X + s * 0.5f, c.Y - s * 0.22f) });
     }
 
+    // Sample wallpaper for previews and screenshots: deep blue to purple with soft colored blobs.
+    public static Bitmap SampleWallpaper(int w, int h) {
+        var b = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(b)) {
+            using (var lg = new LinearGradientBrush(new Rectangle(0, 0, w, h), Color.FromArgb(18, 32, 84), Color.FromArgb(92, 38, 120), 35f)) g.FillRectangle(lg, 0, 0, w, h);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            var blobs = new[] { new { X = 0.18f, Y = 0.30f, R = 0.9f, C = Color.FromArgb(170, 40, 140, 255) },
+                                new { X = 0.80f, Y = 0.20f, R = 0.8f, C = Color.FromArgb(160, 255, 90, 160) },
+                                new { X = 0.55f, Y = 0.95f, R = 0.9f, C = Color.FromArgb(140, 255, 170, 60) } };
+            foreach (var o in blobs) {
+                float r = h * o.R, cx = w * o.X, cy = h * o.Y;
+                using (var p = new GraphicsPath()) {
+                    p.AddEllipse(cx - r, cy - r, 2 * r, 2 * r);
+                    using (var pg = new PathGradientBrush(p) { CenterColor = o.C, SurroundColors = new[] { Color.FromArgb(0, o.C) } }) g.FillPath(pg, p);
+                }
+            }
+        }
+        return b;
+    }
+
     public static float Toward(float cur, float goal, float k) {
         float n = cur + (goal - cur) * k;
         return Math.Abs(goal - n) < 0.002f ? goal : n;
     }
 }
 
+// Liquid Glass look, ported from Liquid Launch (Glass.kt / GlassControls.kt). Settings shared by the tray panel,
+// the on-screen bar and the preview in the glass settings window.
+static class GlassCfg {
+    public static bool On;
+    public static float Blur = 0.45f, Darken = 0.3f, Bezel = 0.45f, SpecWidth = 0.4f, SpecBright = 1f;
+    public static float Rgb = 0.35f, RgbHue = 0f, RgbSpeed = 0.4f;
+    public static bool Refract = true, Spec = true, RgbOn = true, RgbAnim = false, Light = true;
+    public static int WaveMs = 850;
+    public static int Rev; // bumps when something baked into the lens (blur, bezel, refraction) changes
+
+    public static void Reset() {
+        Blur = 0.45f; Darken = 0.3f; Bezel = 0.45f; SpecWidth = 0.4f; SpecBright = 1f;
+        Rgb = 0.35f; RgbHue = 0f; RgbSpeed = 0.4f;
+        Refract = true; Spec = true; RgbOn = true; RgbAnim = false; Light = true; WaveMs = 850;
+        Rev++;
+    }
+
+    public static void From(Config c) {
+        On = c.Design == "glass";
+        Blur = (float)c.GBlur; Darken = (float)c.GDarken; Bezel = (float)c.GBezel;
+        SpecWidth = (float)c.GSpecWidth; SpecBright = (float)c.GSpecBright;
+        Rgb = (float)c.GRgb; RgbHue = (float)c.GRgbHue; RgbSpeed = (float)c.GRgbSpeed;
+        Refract = c.GRefract; Spec = c.GSpec; RgbOn = c.GRgbOn; RgbAnim = c.GRgbAnim; Light = c.GLight;
+        WaveMs = c.GWave == "lenta" ? 1300 : c.GWave == "rapida" ? 480 : 850;
+        Rev++;
+    }
+
+    public static void Into(Config c) {
+        c.GBlur = Blur; c.GDarken = Darken; c.GBezel = Bezel; c.GSpecWidth = SpecWidth; c.GSpecBright = SpecBright;
+        c.GRgb = Rgb; c.GRgbHue = RgbHue; c.GRgbSpeed = RgbSpeed;
+        c.GRefract = Refract; c.GSpec = Spec; c.GRgbOn = RgbOn; c.GRgbAnim = RgbAnim; c.GLight = Light;
+        c.GWave = WaveMs >= 1300 ? "lenta" : WaveMs <= 480 ? "rapida" : "normal";
+    }
+
+    public static float BezelPx { get { return (4f + 16f * Bezel) * Ui.S; } }
+    public static float SpecWidthPx { get { return (0.8f + 2.7f * SpecWidth) * Ui.S; } }
+    public static float RgbAmount { get { return RgbOn ? Rgb : 0f; } }
+    public static bool Spinning { get { return RgbOn && RgbAnim; } }
+
+    // Slow turn of the RGB edge: speed 0 = one turn every 16 s, 1 = every 2 s.
+    public static float Spin {
+        get {
+            if (!Spinning) return 0f;
+            int period = (int)(16000 - 14000 * Math.Max(0f, Math.Min(1f, RgbSpeed)));
+            return (Environment.TickCount & int.MaxValue) % period * 360f / period;
+        }
+    }
+}
+
+static class Glass {
+    static readonly int[] Rainbow = {
+        unchecked((int)0xFFFF3B6B), unchecked((int)0xFFFFB13B), unchecked((int)0xFFE8FF3B), unchecked((int)0xFF3BFF8A),
+        unchecked((int)0xFF3BE6FF), unchecked((int)0xFF5B6BFF), unchecked((int)0xFFC23BFF), unchecked((int)0xFFFF3B6B) };
+
+    public static Color RainbowAt(float t) {
+        t -= (float)Math.Floor(t);
+        float f = t * (Rainbow.Length - 1);
+        int i = Math.Min(Rainbow.Length - 2, (int)f);
+        float k = f - i;
+        Color a = Color.FromArgb(Rainbow[i]), b = Color.FromArgb(Rainbow[i + 1]);
+        return Color.FromArgb((int)(a.R + (b.R - a.R) * k), (int)(a.G + (b.G - a.G) * k), (int)(a.B + (b.B - a.B) * k));
+    }
+
+    public static Color[] RainbowColors() {
+        var c = new Color[Rainbow.Length];
+        for (int i = 0; i < c.Length; i++) c[i] = Color.FromArgb(Rainbow[i]);
+        return c;
+    }
+
+    // What is on screen behind r. Layered windows (our own glass) aren't captured, so this also works while it is visible.
+    public static Bitmap Capture(Rectangle r) {
+        var b = new Bitmap(Math.Max(1, r.Width), Math.Max(1, r.Height), PixelFormat.Format32bppArgb);
+        try { using (var g = Graphics.FromImage(b)) g.CopyFromScreen(r.Location, Point.Empty, r.Size); } catch { }
+        return b;
+    }
+
+    // Blurs by shrinking and enlarging again (blur 0..1, like the "Blur" slider of Liquid Launch).
+    public static Bitmap Blurred(Bitmap shot, float blur) {
+        int w = shot.Width, h = shot.Height;
+        float f = 3f + 22f * Math.Max(0f, Math.Min(1f, blur));
+        int sw = Math.Max(1, (int)(w / f)), sh = Math.Max(1, (int)(h / f));
+        var outB = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+        using (var small = new Bitmap(sw, sh, PixelFormat.Format32bppArgb))
+        using (var ia = new ImageAttributes()) {
+            ia.SetWrapMode(WrapMode.TileFlipXY);
+            using (var g = Graphics.FromImage(small)) {
+                g.InterpolationMode = InterpolationMode.HighQualityBilinear;
+                g.DrawImage(shot, new Rectangle(0, 0, sw, sh), 0, 0, w, h, GraphicsUnit.Pixel, ia);
+            }
+            using (var g = Graphics.FromImage(outB)) {
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                g.DrawImage(small, new Rectangle(0, 0, w, h), 0, 0, sw, sh, GraphicsUnit.Pixel, ia);
+            }
+        }
+        return outB;
+    }
+
+    public static int[] Pixels(Bitmap b) {
+        var d = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+        var px = new int[b.Width * b.Height];
+        Marshal.Copy(d.Scan0, px, 0, px.Length);
+        b.UnlockBits(d);
+        return px;
+    }
+
+    // Premultiplied ARGB is GDI+'s native format: it draws several times faster than plain ARGB.
+    public static Bitmap ToBitmap(int[] px, int w, int h) {
+        var b = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+        Write(b, px);
+        return b;
+    }
+
+    // px must already be premultiplied when b is premultiplied (opaque pixels are the same either way).
+    public static void Write(Bitmap b, int[] px) {
+        var d = b.LockBits(new Rectangle(0, 0, b.Width, b.Height), ImageLockMode.WriteOnly, b.PixelFormat);
+        Marshal.Copy(px, 0, d.Scan0, px.Length);
+        b.UnlockBits(d);
+    }
+
+    // Signed distance to a rounded rectangle (negative inside).
+    public static float Sdf(float px, float py, float cx, float cy, float hx, float hy, float r) {
+        float qx = Math.Abs(px - cx) - hx + r, qy = Math.Abs(py - cy) - hy + r;
+        float mx = Math.Max(qx, 0f), my = Math.Max(qy, 0f);
+        return (float)Math.Sqrt(mx * mx + my * my) + Math.Min(Math.Max(qx, qy), 0f) - r;
+    }
+
+    static int Channel(int[] p, int w, int h, float x, float y, int shift) {
+        x -= 0.5f; y -= 0.5f;
+        if (x < 0) x = 0; if (y < 0) y = 0;
+        if (x > w - 1) x = w - 1; if (y > h - 1) y = h - 1;
+        int x0 = (int)x, y0 = (int)y, x1 = Math.Min(w - 1, x0 + 1), y1 = Math.Min(h - 1, y0 + 1);
+        float fx = x - x0, fy = y - y0;
+        int a = (p[y0 * w + x0] >> shift) & 255, b = (p[y0 * w + x1] >> shift) & 255;
+        int c = (p[y1 * w + x0] >> shift) & 255, d = (p[y1 * w + x1] >> shift) & 255;
+        float top = a + (b - a) * fx, bottom = c + (d - c) * fx;
+        return (int)(top + (bottom - top) * fy + 0.5f);
+    }
+
+    // Edge refraction (the REFRACTION shader): near the edge the backdrop is sampled further inside, like thick glass
+    // bending the light, with red, green and blue at slightly different depths.
+    public static void Refract(int[] src, int[] dst, int w, int h, RectangleF rect, float radius, float bezel) {
+        float hx = rect.Width / 2f, hy = rect.Height / 2f, cx = rect.X + hx, cy = rect.Y + hy;
+        float r = Math.Min(radius, Math.Min(hx, hy));
+        bezel = Math.Min(bezel, Math.Min(hx, hy) * 0.35f); // the center of the glass stays clean
+        if (bezel < 0.5f) return;
+        float strength = bezel * 1.3f, chroma = 0.12f;
+        int xa = Math.Max(0, (int)rect.Left), xb = Math.Min(w, (int)Math.Ceiling(rect.Right));
+        int ya = Math.Max(0, (int)rect.Top), yb = Math.Min(h, (int)Math.Ceiling(rect.Bottom));
+        for (int y = ya; y < yb; y++) {
+            float py = y + 0.5f;
+            for (int x = xa; x < xb; x++) {
+                float px = x + 0.5f;
+                float d = Sdf(px, py, cx, cy, hx, hy, r);
+                if (d > 0f) continue;
+                float edge = 1f + d / bezel;
+                if (edge <= 0f) continue;
+                float k = edge * edge;
+                float gx = Sdf(px + 1, py, cx, cy, hx, hy, r) - Sdf(px - 1, py, cx, cy, hx, hy, r);
+                float gy = Sdf(px, py + 1, cx, cy, hx, hy, r) - Sdf(px, py - 1, cx, cy, hx, hy, r);
+                float len = (float)Math.Sqrt(gx * gx + gy * gy);
+                if (len < 0.0001f) continue;
+                float ox = -gx / len * strength * k, oy = -gy / len * strength * k;
+                int rr = Channel(src, w, h, px + ox * (1 + chroma), py + oy * (1 + chroma), 16);
+                int gg = Channel(src, w, h, px + ox, py + oy, 8);
+                int bb = Channel(src, w, h, px + ox * (1 - chroma), py + oy * (1 - chroma), 0);
+                dst[y * w + x] = unchecked((int)0xFF000000) | (rr << 16) | (gg << 8) | bb;
+            }
+        }
+    }
+
+    // Vertical gradient that doesn't repeat its first row at the bottom (GDI+ tiles linear gradients).
+    public static LinearGradientBrush Vertical(RectangleF r, Color top, Color bottom) {
+        return new LinearGradientBrush(new RectangleF(r.X, r.Y - 1, Math.Max(1, r.Width), r.Height + 2), top, bottom, 90f);
+    }
+
+    // Radial gradient; stops go from the center (0) to the edge (1), like Android's RadialGradient.
+    public static PathGradientBrush Radial(PointF c, float radius, Color[] colors, float[] stops, GraphicsPath holder) {
+        holder.Reset();
+        holder.AddEllipse(c.X - radius, c.Y - radius, 2 * radius, 2 * radius);
+        var b = new PathGradientBrush(holder) { CenterPoint = c };
+        int n = colors.Length;
+        var blend = new ColorBlend(n);
+        for (int i = 0; i < n; i++) {
+            blend.Colors[i] = colors[n - 1 - i];
+            blend.Positions[i] = 1f - stops[n - 1 - i];
+        }
+        blend.Positions[0] = 0f;
+        blend.Positions[n - 1] = 1f;
+        b.InterpolationColors = blend;
+        return b;
+    }
+
+    public static Color White(float a) { return Color.FromArgb(Math.Max(0, Math.Min(255, (int)(a * 255))), 255, 255, 255); }
+
+    // iOS 26 level bar (GlassSlider): a thick glass rail that fills with white up to the value, with a small sun and
+    // the percentage inside (both turn dark when the white passes under them). It glows while it's being dragged.
+    public static void Slider(Graphics g, RectangleF row, int val, float grow, Font font) {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        float h = row.Height, w = row.Width;
+        if (grow > 0f)
+            for (int i = 1; i <= 3; i++) {
+                float o = i * Ui.S;
+                var rr = RectangleF.Inflate(row, o, o);
+                using (var path = Ui.Capsule(rr))
+                using (var p = new Pen(White(0.25f / i * grow), i * 1.6f * Ui.S)) g.DrawPath(p, path);
+            }
+        using (var path = Ui.Capsule(row)) {
+            using (var b = Vertical(row, White(0.18f + 0.14f * grow), White(0.08f + 0.10f * grow))) g.FillPath(b, path);
+            float shown = Math.Max(0, Math.Min(100, val)) / 100f;
+            if (val > 0) {
+                float right = Math.Max(row.X + w * shown, row.X + h * Math.Min(1f, shown * 8f));
+                var st = g.Save();
+                g.SetClip(new RectangleF(row.X, row.Y, right - row.X, h), CombineMode.Intersect);
+                using (var b = Vertical(row, Color.FromArgb(0xF2, 255, 255, 255), Color.FromArgb(0xD9, 0xDD, 0xE1, 0xE6))) g.FillPath(b, path);
+                g.Restore(st);
+            }
+            using (var p = new Pen(White(0.25f + 0.6f * grow), (1f + grow) * Ui.S)) g.DrawPath(p, path);
+            int s = (int)(h * 0.5f);
+            bool sunCovered = val >= 0 && w * shown > h * 0.8f;
+            g.DrawImage(Ui.SunCached(s, sunCovered ? Color.FromArgb(200, 28, 28, 30) : Color.FromArgb(220, 255, 255, 255)), row.X + h * 0.5f - s / 2f, row.Y + (h - s) / 2f);
+            if (val >= 0) {
+                bool dark = shown > 0.86f;
+                Ui.DrawText(g, val + "%", font, new RectangleF(row.X, row.Y, w - h * 0.55f, h),
+                    dark ? Color.FromArgb(28, 28, 30) : White(0.9f), StringAlignment.Far);
+            }
+        }
+    }
+}
+
+// Light that follows the pointer and a wave of light on release (iOS 26/27 style), with spring-like easing.
+class GlassLight {
+    public PointF Pos, Target, WavePos;
+    public float Level, Goal, Wave = 1f;
+    int waveStart, last;
+
+    public void Move(Point p) { Target = p; if (Level <= 0.01f) Pos = p; }
+
+    public void FireWave(Point p) { WavePos = p; waveStart = Environment.TickCount; Wave = 0f; }
+
+    public bool Active { get { return Level > 0.001f || Wave < 0.999f; } }
+
+    // Advances the animation; returns false when nothing is moving any more.
+    public bool Step() {
+        int now = Environment.TickCount;
+        float dt = last == 0 ? 15 : Math.Min(50, Math.Max(1, now - last));
+        last = now;
+        Pos = new PointF(Pos.X + (Target.X - Pos.X) * 0.32f, Pos.Y + (Target.Y - Pos.Y) * 0.32f);
+        if (Level < Goal) Level = Math.Min(Goal, Level + dt / 140f);
+        else if (Level > Goal) Level = Math.Max(Goal, Level - dt / 320f);
+        if (Wave < 1f) {
+            float t = (now - waveStart) / (float)Math.Max(100, GlassCfg.WaveMs);
+            Wave = t >= 1f ? 1f : 1f - (float)Math.Pow(1 - t, 2.2);
+        }
+        float dx = Target.X - Pos.X, dy = Target.Y - Pos.Y;
+        return Level != Goal || Wave < 1f || dx * dx + dy * dy > 0.25f;
+    }
+}
+
+// The RGB edge: a rainbow along the rim, strong at two opposite corners and invisible halfway, with a soft inner glow.
+// Precomputed per pixel once per size; only the colors are recomputed when the hue turns.
+class RgbLayer {
+    public readonly Size Size;
+    readonly int[] idx;
+    readonly float[] ang, fade, glow, stroke;
+    readonly int[] px;
+    readonly Bitmap bmp;
+    int lastHue = -1;
+    float lastAmount = -1f;
+
+    static float Clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+    static float FadeAt(float t) {
+        float[] s = { 0f, 0.22f, 0.38f, 0.62f, 0.78f, 1f }, a = { 1f, 0.2f, 0f, 0f, 0.2f, 1f };
+        if (t <= 0) return 1f;
+        if (t >= 1) return 1f;
+        for (int i = 1; i < s.Length; i++)
+            if (t <= s[i]) return a[i - 1] + (a[i] - a[i - 1]) * (t - s[i - 1]) / (s[i] - s[i - 1]);
+        return 1f;
+    }
+
+    public RgbLayer(int w, int h, RectangleF rect, float radius, float strokeW, float glowR) {
+        Size = new Size(w, h);
+        px = new int[w * h];
+        bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+        float hx = rect.Width / 2f, hy = rect.Height / 2f, cx = rect.X + hx, cy = rect.Y + hy;
+        float r = Math.Min(radius, Math.Min(hx, hy));
+        var li = new List<int>(); var la = new List<float>(); var lf = new List<float>(); var lg = new List<float>(); var ls = new List<float>();
+        float diag = (float)w * w + (float)h * h;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                float fx = x + 0.5f, fy = y + 0.5f;
+                float d = Glass.Sdf(fx, fy, cx, cy, hx, hy, r);
+                if (d > 1f || d < -glowR - 1f) continue;
+                float cov = Clamp01(0.5f - d);
+                float s = cov * Clamp01(d + strokeW + 0.5f);
+                float depth = Math.Max(0f, -d);
+                float gl = cov * (float)Math.Pow(Clamp01(1f - depth / glowR), 2);
+                if (s <= 0f && gl <= 0f) continue;
+                float f = FadeAt((fx * w + fy * h) / diag);
+                if (f <= 0.002f) continue;
+                double a = Math.Atan2(fy - h / 2f, fx - w / 2f) * 180 / Math.PI;
+                if (a < 0) a += 360;
+                li.Add(y * w + x); la.Add((float)a); lf.Add(f); lg.Add(gl); ls.Add(s);
+            }
+        idx = li.ToArray(); ang = la.ToArray(); fade = lf.ToArray(); glow = lg.ToArray(); stroke = ls.ToArray();
+    }
+
+    static int[] lut;
+
+    public Bitmap Get(float hueDeg, float amount) {
+        int hue = (int)Math.Round(hueDeg) % 360;
+        if (hue < 0) hue += 360;
+        if (hue == lastHue && amount == lastAmount) return bmp; // the turn moves in whole degrees
+        lastHue = hue; lastAmount = amount;
+        if (lut == null) {
+            lut = new int[360];
+            for (int i = 0; i < 360; i++) lut[i] = Glass.RainbowAt(i / 360f).ToArgb() & 0xFFFFFF;
+        }
+        for (int i = 0; i < idx.Length; i++) {
+            float a = 1f - (1f - amount * 0.5f * glow[i]) * (1f - amount * stroke[i]);
+            int al = (int)(Math.Min(1f, a * fade[i]) * 255);
+            int deg = ((int)ang[i] - hue) % 360;
+            if (deg < 0) deg += 360;
+            int c = lut[deg];
+            px[idx[i]] = (al << 24) | ((((c >> 16) & 255) * al / 255) << 16) | ((((c >> 8) & 255) * al / 255) << 8) | ((c & 255) * al / 255);
+        }
+        Glass.Write(bmp, px);
+        return bmp;
+    }
+}
+
+// One glass surface (the GlassPainter of Liquid Launch): the backdrop as seen through the glass, the RGB edge and the light.
+class GlassSurface {
+    public Bitmap Lens, Drops;
+    public readonly GlassLight Light = new GlassLight();
+    RgbLayer rgb;
+    int builtRev = -1;
+    Size builtSize;
+    readonly GraphicsPath holder = new GraphicsPath();
+
+    public bool NeedsBuild(Size s) { return Lens == null || s != builtSize || builtRev != GlassCfg.Rev; }
+
+    public void Reset() { builtRev = -1; rgb = null; }
+
+    public void Clear() {
+        if (Lens != null) Lens.Dispose();
+        if (Drops != null) Drops.Dispose();
+        Lens = null; Drops = null; rgb = null;
+    }
+
+    // shot: what's behind the whole window. plate: the glass shape. drops: small round glass buttons inside it.
+    public void Build(Bitmap shot, RectangleF plate, float radius, RectangleF[] drops) {
+        Clear();
+        int w = shot.Width, h = shot.Height;
+        using (var blurred = Glass.Blurred(shot, GlassCfg.Blur)) {
+            int[] src = Glass.Pixels(blurred);
+            int[] dst = (int[])src.Clone();
+            if (GlassCfg.Refract) Glass.Refract(src, dst, w, h, plate, radius, GlassCfg.BezelPx);
+            Lens = Glass.ToBitmap(dst, w, h);
+            if (drops != null && drops.Length > 0) {
+                int[] dd = (int[])src.Clone();
+                if (GlassCfg.Refract)
+                    foreach (var c in drops) Glass.Refract(src, dd, w, h, c, c.Width / 2f, Math.Min(GlassCfg.BezelPx, 12f * Ui.S));
+                Drops = Glass.ToBitmap(dd, w, h);
+            }
+        }
+        builtSize = new Size(w, h);
+        builtRev = GlassCfg.Rev;
+    }
+
+    // Lens, darkening veil, white tint and the top sheen. bright = the small round buttons (lighter glass).
+    public void Plate(Graphics g, GraphicsPath path, RectangleF rect, Bitmap lens, bool bright, float darkenScale) {
+        if (lens != null)
+            using (var tb = new TextureBrush(lens) { WrapMode = WrapMode.Clamp }) g.FillPath(tb, path);
+        else
+            using (var b = new SolidBrush(Color.FromArgb(0xD9, 0x1A, 0x1C, 0x22))) g.FillPath(b, path);
+        float dk = GlassCfg.Darken * darkenScale;
+        if (dk > 0f)
+            using (var b = new SolidBrush(Color.FromArgb((int)(dk * 0.65f * 255), 10, 10, 14))) g.FillPath(b, path);
+        using (var b = Glass.Vertical(rect, Color.FromArgb(bright ? 0x40 : 0x1A, 255, 255, 255), Color.FromArgb(bright ? 0x1A : 0x05, 255, 255, 255)))
+            g.FillPath(b, path);
+        if (GlassCfg.Spec) {
+            var st = g.Save();
+            g.SetClip(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height / 2f), CombineMode.Intersect);
+            using (var b = Glass.Vertical(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height / 2f), Color.FromArgb(bright ? 0x40 : 0x24, 255, 255, 255), Color.FromArgb(0, 255, 255, 255)))
+                g.FillPath(b, path);
+            g.Restore(st);
+        }
+    }
+
+    // Light that follows the pointer (halo inside + lit rim near it) and the wave that spreads on release.
+    // refH: size of the light (the bar height, or a row of the panel); gain: how strong it is.
+    public void Lighting(Graphics g, GraphicsPath path, RectangleF rect, float refH, float gain) {
+        var st = g.Save();
+        g.SetClip(path, CombineMode.Intersect);
+        float lv = Light.Level * gain;
+        if (lv > 0.001f) {
+            var lp = Light.Pos;
+            using (var b = Glass.Radial(lp, refH * 1.9f, new[] { Glass.White(0.26f * lv), Glass.White(0.17f * lv), Glass.White(0.06f * lv), Glass.White(0f) },
+                new[] { 0f, 0.35f, 0.7f, 1f }, holder))
+                g.FillEllipse(b, lp.X - refH * 1.9f, lp.Y - refH * 1.9f, refH * 3.8f, refH * 3.8f);
+            g.Restore(st);
+            using (var b = Glass.Radial(lp, refH * 2.4f, new[] { Glass.White(0.95f * lv), Glass.White(0.35f * lv), Glass.White(0f) }, new[] { 0f, 0.5f, 1f }, holder))
+            using (var p = new Pen(b, 2f * Ui.S)) g.DrawPath(p, path);
+            st = g.Save();
+            g.SetClip(path, CombineMode.Intersect);
+        }
+        float wv = Light.Wave;
+        if (wv < 0.999f) {
+            var wp = Light.WavePos;
+            float far = 0f;
+            foreach (var c in new[] { new PointF(rect.Left, rect.Top), new PointF(rect.Right, rect.Top), new PointF(rect.Left, rect.Bottom), new PointF(rect.Right, rect.Bottom) })
+                far = Math.Max(far, (float)Math.Sqrt((c.X - wp.X) * (c.X - wp.X) + (c.Y - wp.Y) * (c.Y - wp.Y)));
+            float ring = Math.Max(refH * 0.55f, 10f * Ui.S);
+            float radius = ring + far * wv;
+            float fd = (float)Math.Pow(1 - wv, 1.15) * gain;
+            float inner = Math.Max(0f, Math.Min(0.98f, (radius - ring) / radius));
+            float mid = Math.Max(inner + 0.005f, Math.Min(0.995f, inner + (1 - inner) * 0.6f));
+            var colors = new[] { Glass.White(0.22f * fd), Glass.White(0.26f * fd), Glass.White(0.42f * fd), Glass.White(0f) };
+            var stops = new[] { 0f, inner, mid, 1f };
+            using (var b = Glass.Radial(wp, radius, colors, stops, holder))
+                g.FillEllipse(b, wp.X - radius, wp.Y - radius, 2 * radius, 2 * radius);
+            g.Restore(st);
+            using (var b = Glass.Radial(wp, radius, colors, stops, holder))
+            using (var p = new Pen(b, 2f * Ui.S)) g.DrawPath(p, path);
+            return;
+        }
+        g.Restore(st);
+    }
+
+    // RGB edge, the rim (strong at the top, faint at the bottom) and the specular reflection along the top-left edge.
+    public void Edges(Graphics g, GraphicsPath path, RectangleF rect, float radius, bool bright, bool withRgb, Size win) {
+        float amount = withRgb ? GlassCfg.RgbAmount : 0f;
+        if (amount > 0.01f) {
+            if (rgb == null || rgb.Size != win) rgb = new RgbLayer(win.Width, win.Height, rect, radius, 1.3f * Ui.S, 6f * Ui.S);
+            g.DrawImage(rgb.Get(GlassCfg.RgbHue * 360f + GlassCfg.Spin, amount), 0, 0, win.Width, win.Height);
+        }
+        float k = amount > 0.01f ? 1f - amount * 0.6f : 1f;
+        using (var b = Glass.Vertical(rect, Color.FromArgb((int)((bright ? 0xE6 : 0xA6) * k), 255, 255, 255), Color.FromArgb((int)(0x26 * k), 255, 255, 255)))
+        using (var p = new Pen(b, (GlassCfg.Spec ? 1.3f : 1f) * Ui.S)) g.DrawPath(p, path);
+        if (!GlassCfg.Spec) return;
+        // Gradient from the top-left corner along (0.35 w, h), clamped so it doesn't start over at the far corner
+        float vx = rect.Width * 0.35f, vy = rect.Height;
+        float tMax = Math.Max(1f, (rect.Width * vx + rect.Height * vy) / (vx * vx + vy * vy));
+        var a = new PointF(rect.X, rect.Y);
+        var z = new PointF(rect.X + vx * tMax, rect.Y + vy * tMax);
+        using (var b = new LinearGradientBrush(a, z, Color.White, Color.Transparent)) {
+            var blend = new ColorBlend(4);
+            blend.Colors = new[] { Glass.White(0.35f + 0.4f * GlassCfg.SpecBright), Glass.White(0.1f), Glass.White(0f), Glass.White(0f) };
+            blend.Positions = new[] { 0f, 0.35f / tMax, 0.7f / tMax, 1f };
+            b.InterpolationColors = blend;
+            float wpx = bright ? Math.Min(GlassCfg.SpecWidthPx, 2f * Ui.S) : GlassCfg.SpecWidthPx;
+            using (var p = new Pen(b, wpx)) g.DrawPath(p, path);
+        }
+    }
+}
+
 // Dark frosted panel with a brightness row; base of the tray panel and the shortcut bar.
+// With the Liquid Glass design it becomes a layered window (per-pixel alpha) drawn entirely by GlassSurface.
 abstract class DarkPanel : Form {
     protected Bitmap frost;
     protected int value = -1;
@@ -723,6 +1221,10 @@ abstract class DarkPanel : Form {
     protected float grow;
     protected readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
     protected bool acrylic;
+    protected bool glass; // Liquid Glass design (decided when the window is created)
+    protected readonly GlassSurface surface = new GlassSurface();
+    Bitmap buffer;
+    bool renderQueued;
     protected readonly Font fTitle = Ui.F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 11f, FontStyle.Regular);
     protected readonly Font fLabel = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9f, FontStyle.Regular);
     protected readonly Font fText = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
@@ -738,23 +1240,63 @@ abstract class DarkPanel : Form {
         AutoScaleMode = AutoScaleMode.None;
         BackColor = Color.Black;
         DoubleBuffered = true;
-        anim.Tick += delegate { if (!Animate()) anim.Stop(); Invalidate(); };
+        anim.Tick += delegate {
+            if (!Animate()) anim.Stop();
+            if (!SkipFrame()) Invalidate();
+        };
     }
 
     protected abstract RectangleF SliderRow { get; }
+    protected abstract void PaintContent(Graphics g);
     protected virtual void ItemHover(Point p) { }
     protected virtual void ItemClick(Point p) { }
+
+    // Glass shape and light, per window.
+    protected virtual float Corner { get { return Ui.P(24); } }
+    protected virtual float LightRef { get { return Ui.P(56); } }
+    protected virtual float LightGain { get { return 0.7f; } }
+    protected virtual RectangleF[] Drops { get { return null; } }
+    protected virtual void PaintGlassInner(Graphics g) { }
+
+    RectangleF PlateRect {
+        get { float i = 0.6f * Ui.S; return new RectangleF(i, i, ClientSize.Width - 2 * i, ClientSize.Height - 2 * i); }
+    }
+
+    float PlateCorner { get { var p = PlateRect; return Math.Min(Corner, Math.Min(p.Width, p.Height) / 2f); } }
 
     // Steps the animations; returns false when they're all done.
     protected virtual bool Animate() {
         float goal = drag ? 1f : (hoverSlider ? 0.5f : 0f);
         grow = Ui.Toward(grow, goal, 0.25f);
-        return grow != goal;
+        bool more = grow != goal;
+        if (glass) more |= surface.Light.Step() | GlassCfg.Spinning;
+        return more;
+    }
+
+    int lastFrame;
+
+    // While only the RGB edge turns, repaint at about 30 frames per second instead of every tick.
+    protected bool SkipFrame() {
+        if (!glass || drag || grow != (hoverSlider ? 0.5f : 0f) || surface.Light.Active) return false;
+        int now = Environment.TickCount;
+        if (now - lastFrame < 33) return true;
+        lastFrame = now;
+        return false;
+    }
+
+    protected override CreateParams CreateParams {
+        get {
+            var cp = base.CreateParams;
+            if (GlassCfg.On) cp.ExStyle |= 0x80000; // WS_EX_LAYERED: per-pixel alpha for the rounded glass
+            return cp;
+        }
     }
 
     // Windows 11 draws real Acrylic blur; on Windows 10 it's imitated with a blurred picture.
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
+        glass = GlassCfg.On;
+        if (glass) { acrylic = false; return; }
         Ui.Round(this);
         acrylic = Ui.Backdrop(this, 3, true);
     }
@@ -763,6 +1305,14 @@ abstract class DarkPanel : Form {
     protected void ShowFrosted(Point at) {
         Location = at;
         if (!IsHandleCreated) CreateHandle();
+        if (glass) {
+            BuildGlass();
+            Render();
+            Show();
+            Render();
+            if (GlassCfg.Spinning) anim.Start();
+            return;
+        }
         if (!acrylic) {
             if (frost != null) frost.Dispose();
             frost = Ui.Frost(new Rectangle(at, Size));
@@ -771,7 +1321,109 @@ abstract class DarkPanel : Form {
         Invalidate();
     }
 
+    // Switches between the Windows 11 and Liquid Glass designs (the window is rebuilt the next time it shows).
+    public void ResetDesign() {
+        if (Visible) Hide();
+        surface.Clear();
+        if (frost != null) { frost.Dispose(); frost = null; }
+        if (IsHandleCreated) RecreateHandle();
+    }
+
+    // A glass setting changed: rebuild the lens now if the window is on screen.
+    public void GlassChanged() {
+        surface.Reset();
+        if (glass && Visible) { BuildGlass(); Render(); if (GlassCfg.Spinning) anim.Start(); }
+    }
+
+    [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr h, uint affinity);
+
+    // Screen captures include our own glass window: leave it out just for this capture, so it sees what's behind it.
+    void BuildGlass() {
+        bool hidden = IsHandleCreated && Visible && SetWindowDisplayAffinity(Handle, 0x11); // WDA_EXCLUDEFROMCAPTURE
+        try {
+            using (var shot = Glass.Capture(new Rectangle(Location, ClientSize)))
+                surface.Build(shot, PlateRect, PlateCorner, Drops);
+        } finally {
+            if (hidden) SetWindowDisplayAffinity(Handle, 0);
+        }
+    }
+
+    protected override void OnLocationChanged(EventArgs e) {
+        base.OnLocationChanged(e);
+        if (glass && Visible) { BuildGlass(); Render(); }
+    }
+
+    protected override void OnSizeChanged(EventArgs e) {
+        base.OnSizeChanged(e);
+        if (glass && Visible) { BuildGlass(); Render(); }
+    }
+
+    // Glass windows are drawn into a bitmap and handed to Windows with their transparency (UpdateLayeredWindow).
+    protected override void OnInvalidated(InvalidateEventArgs e) {
+        base.OnInvalidated(e);
+        if (!glass || renderQueued || !IsHandleCreated || !Visible) return;
+        renderQueued = true;
+        BeginInvoke((Action)delegate { renderQueued = false; Render(); });
+    }
+
+    protected override void OnPaint(PaintEventArgs e) { if (!glass) PaintContent(e.Graphics); }
+
+    void Render() {
+        if (!glass || !IsHandleCreated) return;
+        var size = ClientSize;
+        if (size.Width <= 0 || size.Height <= 0) return;
+        if (surface.NeedsBuild(size)) BuildGlass();
+        if (buffer == null || buffer.Size != size) {
+            if (buffer != null) buffer.Dispose();
+            buffer = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb);
+        }
+        using (var g = Graphics.FromImage(buffer)) {
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            var plate = PlateRect;
+            float r = PlateCorner;
+            using (var path = Ui.RoundRect(plate, r)) {
+                surface.Plate(g, path, plate, surface.Lens, false, 1f);
+                PaintGlassInner(g);
+                if (GlassCfg.Light) surface.Lighting(g, path, plate, LightRef, LightGain);
+                surface.Edges(g, path, plate, r, false, true, size);
+            }
+            PaintContent(g);
+        }
+        Push(buffer);
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)] struct Blend { public byte Op, Flags, Alpha, Format; }
+    [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dst, ref Point ptDst, ref Size size, IntPtr src, ref Point ptSrc, int key, ref Blend blend, int flags);
+    [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+    [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+
+    void Push(Bitmap b) {
+        IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen), hb = IntPtr.Zero, old = IntPtr.Zero;
+        try {
+            hb = b.GetHbitmap(Color.FromArgb(0));
+            old = SelectObject(mem, hb);
+            var size = b.Size;
+            var src = Point.Empty;
+            var dst = Location;
+            var blend = new Blend { Op = 0, Flags = 0, Alpha = 255, Format = 1 };
+            UpdateLayeredWindow(Handle, screen, ref dst, ref size, mem, ref src, 0, ref blend, 2); // ULW_ALPHA
+        } finally {
+            if (old != IntPtr.Zero) SelectObject(mem, old);
+            if (hb != IntPtr.Zero) DeleteObject(hb);
+            DeleteDC(mem);
+            ReleaseDC(IntPtr.Zero, screen);
+        }
+    }
+
     protected override void OnPaintBackground(PaintEventArgs e) {
+        if (glass) return;
         if (frost != null) { e.Graphics.DrawImageUnscaled(frost, 0, 0); return; }
         if (acrylic) {
             e.Graphics.Clear(Color.Transparent);
@@ -795,6 +1447,13 @@ abstract class DarkPanel : Form {
         if (SliderMoved != null) SliderMoved(v);
     }
 
+    // The glass bar fills the whole row; the Windows 11 one leaves room for the suns.
+    int ValueAtX(float x) {
+        if (!glass) return Ui.ValueAt(SliderRow, x);
+        var row = SliderRow;
+        return (int)Math.Round((x - row.X) * 100 / Math.Max(1f, row.Width));
+    }
+
     bool OnSlider(Point p) {
         var r = SliderRow;
         r.Inflate(0, Ui.P(6));
@@ -803,19 +1462,29 @@ abstract class DarkPanel : Form {
 
     protected override void OnMouseDown(MouseEventArgs e) {
         if (e.Button != MouseButtons.Left) return;
-        if (OnSlider(e.Location)) { drag = true; anim.Start(); SlideTo(Ui.ValueAt(SliderRow, e.X)); }
+        if (glass) { surface.Light.Move(e.Location); surface.Light.Goal = 1f; anim.Start(); }
+        if (OnSlider(e.Location)) { drag = true; anim.Start(); SlideTo(ValueAtX(e.X)); }
         else ItemClick(e.Location);
     }
 
     protected override void OnMouseMove(MouseEventArgs e) {
-        if (drag) { SlideTo(Ui.ValueAt(SliderRow, e.X)); return; }
+        if (glass) {
+            surface.Light.Move(e.Location);
+            if (surface.Light.Goal < 0.55f) surface.Light.Goal = 0.55f;
+            anim.Start();
+        }
+        if (drag) { SlideTo(ValueAtX(e.X)); return; }
         bool h = OnSlider(e.Location);
         if (h != hoverSlider) { hoverSlider = h; anim.Start(); }
         ItemHover(e.Location);
         if (h) Cursor = Cursors.Hand;
     }
 
-    protected override void OnMouseUp(MouseEventArgs e) { drag = false; anim.Start(); }
+    protected override void OnMouseUp(MouseEventArgs e) {
+        drag = false;
+        if (glass) { surface.Light.FireWave(e.Location); surface.Light.Goal = 0.55f; }
+        anim.Start();
+    }
 
     // Losing the mouse mid-drag (Alt+Tab, a system prompt) sends no mouse-up: without this the drag never ends.
     protected override void OnMouseCaptureChanged(EventArgs e) {
@@ -825,17 +1494,20 @@ abstract class DarkPanel : Form {
 
     protected override void OnVisibleChanged(EventArgs e) {
         base.OnVisibleChanged(e);
-        if (!Visible) { drag = false; hoverSlider = false; grow = 0; }
+        if (!Visible) { drag = false; hoverSlider = false; grow = 0; surface.Light.Level = surface.Light.Goal = 0f; surface.Light.Wave = 1f; }
     }
 
     // Rebuilds the native window while hidden: after the display sleeps or changes mode, an old backdrop window can come back blank.
     public void ResetWindow() {
         if (IsHandleCreated && !Visible) RecreateHandle();
     }
-    protected override void OnMouseLeave(EventArgs e) { hoverSlider = false; anim.Start(); ItemHover(new Point(-1, -1)); }
+    protected override void OnMouseLeave(EventArgs e) { hoverSlider = false; surface.Light.Goal = 0f; anim.Start(); ItemHover(new Point(-1, -1)); }
     protected override void OnMouseWheel(MouseEventArgs e) { if (value >= 0) SlideTo(value + (e.Delta > 0 ? 2 : -2)); }
 
-    protected void PaintSlider(Graphics g) { Ui.SliderRow(g, SliderRow, value, grow); }
+    protected void PaintSlider(Graphics g) {
+        if (glass) Glass.Slider(g, SliderRow, value, grow, fLabel);
+        else Ui.SliderRow(g, SliderRow, value, grow);
+    }
 }
 
 // Panel that opens when you click the tray icon.
@@ -850,6 +1522,22 @@ class Popup : DarkPanel {
     public int HiddenAt;
     public event Action<int> ButtonClicked;
     public bool MenuOpen;
+
+    // Round buttons are drops of glass of their own (GlassCircleButton of Liquid Launch).
+    protected override RectangleF[] Drops { get { return new[] { Circle(0), Circle(1), Circle(2) }; } }
+
+    protected override void PaintGlassInner(Graphics g) {
+        for (int i = 0; i < Labels.Length; i++) {
+            var c = Circle(i);
+            using (var path = new GraphicsPath()) {
+                path.AddEllipse(c);
+                surface.Plate(g, path, c, surface.Drops ?? surface.Lens, true, 0.5f);
+                if (on[i])
+                    using (var b = Glass.Vertical(c, Color.FromArgb(0xF2, 255, 255, 255), Color.FromArgb(0xD9, 0xDD, 0xE1, 0xE6))) g.FillPath(b, path);
+                surface.Edges(g, path, c, c.Width / 2f, true, false, ClientSize);
+            }
+        }
+    }
 
     public Popup() {
         ClientSize = new Size(Ui.P(300), Ui.P(318));
@@ -964,8 +1652,7 @@ class Popup : DarkPanel {
         return base.ProcessCmdKey(ref msg, k);
     }
 
-    protected override void OnPaint(PaintEventArgs e) {
-        var g = e.Graphics;
+    protected override void PaintContent(Graphics g) {
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
@@ -980,7 +1667,7 @@ class Popup : DarkPanel {
                 g.FillPath(b, path);
             Ui.DrawText(g, "HDR", fBadge, br, Color.FromArgb(28, 28, 30), StringAlignment.Center);
         }
-        if (value >= 0)
+        if (value >= 0 && !glass) // the glass bar shows it inside
             Ui.DrawText(g, value + "%", fSmall, new RectangleF(W - pad - Ui.P(50), Ui.P(12), Ui.P(50), Ui.P(24)), Ui.Text2, StringAlignment.Far);
         string s = sub;
         if (hdr) s += L.T(" · HDR activo en Windows", " · HDR on in Windows");
@@ -992,8 +1679,10 @@ class Popup : DarkPanel {
         for (int i = 0; i < Labels.Length; i++) {
             var c = Circle(i);
             var center = new PointF(c.X + c.Width / 2, c.Y + c.Height / 2);
-            var fill = on[i] ? Color.FromArgb(245, 245, 247) : Color.FromArgb(hot == i ? 58 : 38, 255, 255, 255);
-            using (var b = new SolidBrush(fill)) g.FillEllipse(b, c);
+            if (!glass) { // in glass the drop was painted with the glass, under the light
+                var fill = on[i] ? Color.FromArgb(245, 245, 247) : Color.FromArgb(hot == i ? 58 : 38, 255, 255, 255);
+                using (var b = new SolidBrush(fill)) g.FillEllipse(b, c);
+            }
             var ic = on[i] ? Color.FromArgb(28, 28, 30) : Ui.Text;
             float sz = c.Width * 0.46f;
             if (i == 0) Ui.IconEye(g, center, sz, ic);
@@ -1057,6 +1746,11 @@ class Osd : DarkPanel {
 
     protected override RectangleF SliderRow { get { return new RectangleF(Ui.P(18), (ClientSize.Height - Ui.P(28)) / 2f, ClientSize.Width - Ui.P(36), Ui.P(28)); } }
 
+    // A pill of glass, lit like the search bar of Liquid Launch.
+    protected override float Corner { get { return ClientSize.Height / 2f; } }
+    protected override float LightRef { get { return ClientSize.Height; } }
+    protected override float LightGain { get { return 1f; } }
+
     Point Where() {
         var wa = Screen.PrimaryScreen.WorkingArea;
         int cx = wa.Left + (wa.Width - Width) / 2;
@@ -1102,9 +1796,8 @@ class Osd : DarkPanel {
     protected override void OnMouseDown(MouseEventArgs e) { if (message == null) base.OnMouseDown(e); }
     protected override void OnMouseWheel(MouseEventArgs e) { if (message == null) base.OnMouseWheel(e); }
 
-    protected override void OnPaint(PaintEventArgs e) {
-        if (message == null) { PaintSlider(e.Graphics); return; }
-        var g = e.Graphics;
+    protected override void PaintContent(Graphics g) {
+        if (message == null) { PaintSlider(g); return; }
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
         int s = Ui.P(18), pad = Ui.P(18);
@@ -1159,8 +1852,10 @@ class SettingsForm : Form {
     readonly CheckBox startup = new CheckBox(), showScreen = new CheckBox(), showSleep = new CheckBox(), showPlan = new CheckBox();
     readonly HotkeyBox keyUp = new HotkeyBox(), keyDown = new HotkeyBox();
     readonly TextBox ip = new TextBox();
-    readonly Button find = new Button(), save = new Button(), cancel = new Button();
+    readonly Button find = new Button(), save = new Button(), cancel = new Button(), adjust = new Button();
+    readonly ComboBox design = new ComboBox();
     int y;
+    public event Action AdjustGlass;
 
     public bool Startup { get { return startup.Checked; } }
     public event Action<bool> Saved; // true if the IP changed
@@ -1180,6 +1875,20 @@ class SettingsForm : Form {
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
 
         y = Ui.P(18);
+        design.DropDownStyle = ComboBoxStyle.DropDownList;
+        design.FlatStyle = FlatStyle.Flat;
+        design.Items.AddRange(new object[] { "Windows 11", "Liquid Glass" });
+        design.SelectedIndex = cfg.Design == "glass" ? 1 : 0;
+        var designBox = new Panel { BackColor = Bg, Size = new Size(Ui.P(216), Ui.P(30)) };
+        design.SetBounds(0, Ui.P(2), Ui.P(130), Ui.P(26));
+        adjust.SetBounds(Ui.P(138), 0, Ui.P(78), Ui.P(30));
+        adjust.Text = L.T("Ajustar…", "Adjust…");
+        Flat(adjust, Field);
+        adjust.Click += delegate { if (AdjustGlass != null) AdjustGlass(); };
+        designBox.Controls.Add(design);
+        designBox.Controls.Add(adjust);
+        AddRow(L.T("Diseño", "Design"), designBox, Ui.P(216));
+
         secs.DecimalPlaces = 1; secs.Increment = 0.5M; secs.Minimum = 0.5M; secs.Maximum = 10;
         secs.Value = (decimal)Math.Max(0.5, Math.Min(10, cfg.OsdSegundos));
         AddRow(L.T("Duración del cartel (segundos)", "On-screen bar duration (s)"), secs, Ui.P(90));
@@ -1248,7 +1957,7 @@ class SettingsForm : Form {
         AcceptButton = save;
         CancelButton = cancel;
 
-        foreach (Control c in new Control[] { secs, step, pos, ip, keyUp, keyDown }) { c.BackColor = Field; c.ForeColor = Ui.Text; }
+        foreach (Control c in new Control[] { secs, step, pos, ip, keyUp, keyDown, design }) { c.BackColor = Field; c.ForeColor = Ui.Text; }
         ip.BorderStyle = BorderStyle.FixedSingle;
         keyUp.BorderStyle = BorderStyle.FixedSingle;
         keyDown.BorderStyle = BorderStyle.FixedSingle;
@@ -1281,6 +1990,7 @@ class SettingsForm : Form {
             cfg.HideScreenOff = !showScreen.Checked;
             cfg.HideSleep = !showSleep.Checked;
             cfg.HidePlan = !showPlan.Checked;
+            cfg.Design = design.SelectedIndex == 1 ? "glass" : "win11";
             cfg.Save();
             if (Saved != null) Saved(ipChanged);
             Close();
@@ -1312,6 +2022,340 @@ class SettingsForm : Form {
         base.OnHandleCreated(e);
         Ui.DarkTitle(this);
         Ui.Backdrop(this, 2, false); // Mica on the title bar
+    }
+}
+
+// Small slider for the settings windows (Windows 11 style). Rainbow = hue picker.
+class MiniSlider : Control {
+    float val;
+    bool drag;
+    public bool Rainbow;
+    public event EventHandler ValueChanged;
+
+    public MiniSlider() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.Selectable | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+        Height = Ui.P(26);
+    }
+
+    public float Value {
+        get { return val; }
+        set { val = Math.Max(0f, Math.Min(1f, value)); Invalidate(); }
+    }
+
+    float Pad { get { return Ui.P(10); } }
+
+    void SetFrom(float v) {
+        v = Math.Max(0f, Math.Min(1f, v));
+        if (Math.Abs(v - val) < 0.0001f) return;
+        val = v;
+        Invalidate();
+        if (ValueChanged != null) ValueChanged(this, EventArgs.Empty);
+    }
+
+    void FromX(int x) { SetFrom((x - Pad) / Math.Max(1f, Width - 2 * Pad)); }
+
+    protected override void OnMouseDown(MouseEventArgs e) { if (!Enabled) return; Focus(); drag = true; FromX(e.X); }
+    protected override void OnMouseMove(MouseEventArgs e) { if (drag) FromX(e.X); }
+    protected override void OnMouseUp(MouseEventArgs e) { drag = false; }
+    protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) drag = false; }
+    protected override void OnMouseWheel(MouseEventArgs e) { if (Enabled) SetFrom(val + (e.Delta > 0 ? 0.02f : -0.02f)); }
+    protected override bool IsInputKey(Keys k) { return k == Keys.Left || k == Keys.Right || base.IsInputKey(k); }
+    protected override void OnKeyDown(KeyEventArgs e) {
+        if (e.KeyCode == Keys.Left) SetFrom(val - 0.02f);
+        else if (e.KeyCode == Keys.Right) SetFrom(val + 0.02f);
+    }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(BackColor);
+        int a = Enabled ? 255 : 90;
+        float cy = Height / 2f, th = Ui.P(4);
+        var track = new RectangleF(Pad, cy - th / 2, Width - 2 * Pad, th);
+        float kx = Pad + (Width - 2 * Pad) * val;
+        if (Rainbow) {
+            var cols = Glass.RainbowColors();
+            using (var b = new LinearGradientBrush(new RectangleF(track.X - 1, track.Y, track.Width + 2, track.Height), Color.White, Color.White, 0f)) {
+                var blend = new ColorBlend(cols.Length);
+                for (int i = 0; i < cols.Length; i++) { blend.Colors[i] = Color.FromArgb(a, cols[i]); blend.Positions[i] = i / (float)(cols.Length - 1); }
+                b.InterpolationColors = blend;
+                using (var path = Ui.Capsule(track)) g.FillPath(b, path);
+            }
+        } else {
+            using (var path = Ui.Capsule(track))
+            using (var b = new SolidBrush(Color.FromArgb(a * 60 / 255, 255, 255, 255))) g.FillPath(b, path);
+            if (kx > track.X)
+                using (var path = Ui.Capsule(new RectangleF(track.X, track.Y, kx - track.X, th)))
+                using (var b = new SolidBrush(Color.FromArgb(a, Ui.Accent))) g.FillPath(b, path);
+        }
+        float r = Ui.P(8);
+        using (var b = new SolidBrush(Color.FromArgb(a * 50 / 255, 0, 0, 0))) g.FillEllipse(b, kx - r, cy - r + Ui.S, 2 * r, 2 * r);
+        using (var b = new SolidBrush(Color.FromArgb(a, 245, 245, 247))) g.FillEllipse(b, kx - r, cy - r, 2 * r, 2 * r);
+        if (Rainbow)
+            using (var b = new SolidBrush(Color.FromArgb(a, Glass.RainbowAt(val)))) g.FillEllipse(b, kx - r * 0.55f, cy - r * 0.55f, r * 1.1f, r * 1.1f);
+    }
+}
+
+// Live preview of the glass: the on-screen bar over a sample wallpaper. It reacts to the mouse like the real one.
+class GlassPreview : Control {
+    Bitmap wall;
+    readonly GlassSurface surface = new GlassSurface();
+    readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
+    readonly Font font = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9f, FontStyle.Regular);
+    int value = 62;
+    bool drag;
+    float grow;
+
+    public GlassPreview() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        anim.Tick += delegate {
+            bool moving = surface.Light.Step();
+            float goal = drag ? 1f : 0f;
+            grow = Ui.Toward(grow, goal, 0.25f);
+            if (!moving && grow == goal && !GlassCfg.Spinning) anim.Stop();
+            Invalidate();
+        };
+    }
+
+    RectangleF Pill {
+        get {
+            float w = Math.Min(Width - Ui.P(40), Ui.P(340)), h = Ui.P(56);
+            return new RectangleF((Width - w) / 2f, (Height - h) / 2f, w, h);
+        }
+    }
+
+    RectangleF Row { get { var p = Pill; return new RectangleF(p.X + Ui.P(18), p.Y + (p.Height - Ui.P(28)) / 2f, p.Width - Ui.P(36), Ui.P(28)); } }
+
+    public void Changed() {
+        surface.Reset();
+        if (GlassCfg.Spinning) anim.Start();
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        if (wall == null || wall.Size != ClientSize) {
+            if (wall != null) wall.Dispose();
+            wall = Ui.SampleWallpaper(Math.Max(1, Width), Math.Max(1, Height));
+            surface.Reset();
+        }
+        g.DrawImageUnscaled(wall, 0, 0);
+        if (!GlassCfg.On) {
+            using (var b = new SolidBrush(Color.FromArgb(150, 20, 20, 22))) g.FillRectangle(b, ClientRectangle);
+            Ui.DrawText(g, L.T("Elegí el diseño Liquid Glass para usar estos ajustes", "Choose the Liquid Glass design to use these settings"),
+                font, ClientRectangle, Ui.Text, StringAlignment.Center);
+            return;
+        }
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        var plate = Pill;
+        float r = plate.Height / 2f;
+        if (surface.NeedsBuild(ClientSize)) surface.Build(wall, plate, r, null);
+        using (var path = Ui.RoundRect(plate, r)) {
+            surface.Plate(g, path, plate, surface.Lens, false, 1f);
+            if (GlassCfg.Light) surface.Lighting(g, path, plate, plate.Height, 1f);
+            surface.Edges(g, path, plate, r, false, true, ClientSize);
+        }
+        Glass.Slider(g, Row, value, grow, font);
+    }
+
+    void Wake() { if (!anim.Enabled) anim.Start(); }
+
+    protected override void OnMouseMove(MouseEventArgs e) {
+        if (drag) { SetFromX(e.X); }
+        var lt = surface.Light;
+        lt.Move(e.Location);
+        lt.Goal = Pill.Contains(e.Location) ? (drag ? 1f : 0.55f) : 0f;
+        Wake();
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e) {
+        if (!GlassCfg.On || e.Button != MouseButtons.Left) return;
+        surface.Light.Goal = 1f;
+        var row = Row;
+        row.Inflate(0, Ui.P(6));
+        if (row.Contains(e.Location)) { drag = true; SetFromX(e.X); }
+        Wake();
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e) {
+        drag = false;
+        if (GlassCfg.On && Pill.Contains(e.Location)) { surface.Light.FireWave(e.Location); surface.Light.Goal = 0.55f; }
+        Wake();
+    }
+
+    protected override void OnMouseLeave(EventArgs e) { surface.Light.Goal = 0f; Wake(); }
+
+    void SetFromX(int x) {
+        var row = Row;
+        value = Math.Max(0, Math.Min(100, (int)Math.Round((x - row.X) * 100 / row.Width)));
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing) {
+        if (disposing) { anim.Dispose(); surface.Clear(); if (wall != null) wall.Dispose(); }
+        base.Dispose(disposing);
+    }
+}
+
+// Glass settings (the "Glass", "Advanced glass", "RGB edge" and "HDR" sections of Liquid Launch). Changes apply live.
+class GlassSettingsForm : Form {
+    static readonly Color Bg = Color.FromArgb(32, 32, 34), Field = Color.FromArgb(48, 48, 52);
+    readonly Config cfg;
+    readonly GlassPreview preview = new GlassPreview();
+    readonly List<Action> refreshers = new List<Action>();
+    readonly int colW, rowH = Ui.P(34);
+    readonly int[] colY = new int[2];
+    public event Action Changed;
+
+    public GlassSettingsForm(Config cfg) {
+        this.cfg = cfg;
+        Text = L.T("LGBrillo · Ajustes del vidrio", "LGBrillo · Glass settings");
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
+        MinimizeBox = false;
+        StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.None;
+        BackColor = Bg;
+        ForeColor = Ui.Text;
+        Font = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
+        ClientSize = new Size(Ui.P(780), Ui.P(600));
+        try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+
+        preview.SetBounds(Ui.P(22), Ui.P(18), ClientSize.Width - Ui.P(44), Ui.P(130));
+        Controls.Add(preview);
+        colW = (ClientSize.Width - Ui.P(66)) / 2;
+        colY[0] = colY[1] = preview.Bottom + Ui.P(16);
+
+        Head(0, L.T("Vidrio", "Glass"));
+        Slider(0, L.T("Desenfoque", "Blur"), () => GlassCfg.Blur, v => { GlassCfg.Blur = v; GlassCfg.Rev++; }, Pct, null);
+        Slider(0, L.T("Oscurecer", "Darken"), () => GlassCfg.Darken, v => GlassCfg.Darken = v, Pct, null);
+        Check(0, L.T("Refracción en el borde", "Edge refraction"), () => GlassCfg.Refract, v => { GlassCfg.Refract = v; GlassCfg.Rev++; }, null);
+        Slider(0, L.T("Bisel", "Bezel"), () => GlassCfg.Bezel, v => { GlassCfg.Bezel = v; GlassCfg.Rev++; },
+            v => Math.Round(4 + 16 * v) + " dp", () => GlassCfg.Refract);
+        Head(0, L.T("Reflector", "Reflector"));
+        Check(0, L.T("Reflejo especular en el borde", "Specular edge reflection"), () => GlassCfg.Spec, v => GlassCfg.Spec = v, null);
+        Slider(0, L.T("Ancho del reflejo", "Reflection width"), () => GlassCfg.SpecWidth, v => GlassCfg.SpecWidth = v,
+            v => Math.Max(1, Math.Round(0.8 + 2.7 * v)) + " dp", () => GlassCfg.Spec);
+        Slider(0, L.T("Brillo del reflejo", "Reflection brightness"), () => GlassCfg.SpecBright, v => GlassCfg.SpecBright = v, Pct, () => GlassCfg.Spec);
+
+        Head(1, L.T("Borde RGB", "RGB edge"));
+        Check(1, L.T("Borde RGB", "RGB edge"), () => GlassCfg.RgbOn, v => GlassCfg.RgbOn = v, null);
+        Slider(1, L.T("Intensidad", "Intensity"), () => GlassCfg.Rgb, v => GlassCfg.Rgb = v, Pct, () => GlassCfg.RgbOn);
+        var hue = Slider(1, L.T("Tono", "Hue"), () => GlassCfg.RgbHue, v => GlassCfg.RgbHue = v, v => Math.Round(v * 360) + "°", () => GlassCfg.RgbOn);
+        hue.Rainbow = true;
+        Check(1, L.T("RGB animado", "Animated RGB"), () => GlassCfg.RgbAnim, v => GlassCfg.RgbAnim = v, () => GlassCfg.RgbOn);
+        Slider(1, L.T("Velocidad del giro", "Spin speed"), () => GlassCfg.RgbSpeed, v => GlassCfg.RgbSpeed = v, Pct, () => GlassCfg.Spinning);
+        Head(1, L.T("Luz", "Light"));
+        Check(1, L.T("Luz que sigue al mouse", "Light that follows the mouse"), () => GlassCfg.Light, v => GlassCfg.Light = v, null);
+        Wave(1);
+
+        int bottom = Math.Max(colY[0], colY[1]) + Ui.P(12);
+        ClientSize = new Size(ClientSize.Width, bottom + Ui.P(56));
+        var reset = new Button { Text = L.T("Restablecer", "Reset") };
+        var done = new Button { Text = L.T("Listo", "Done") };
+        reset.SetBounds(Ui.P(22), ClientSize.Height - Ui.P(50), Ui.P(130), Ui.P(34));
+        done.SetBounds(ClientSize.Width - Ui.P(22) - Ui.P(110), reset.Top, Ui.P(110), Ui.P(34));
+        Flat(reset, Field);
+        Flat(done, Ui.Accent);
+        if (Ui.Accent.GetBrightness() > 0.6f) done.ForeColor = Color.Black;
+        reset.Click += delegate { GlassCfg.Reset(); Apply(); };
+        done.Click += delegate { Close(); };
+        Controls.Add(reset);
+        Controls.Add(done);
+        AcceptButton = done;
+        CancelButton = done;
+        FormClosed += delegate { GlassCfg.Into(cfg); cfg.Save(); };
+        Apply(false);
+    }
+
+    static string Pct(float v) { return Math.Round(v * 100) + "%"; }
+
+    // Writes the values to the config, refreshes every control and the preview, and tells the app.
+    void Apply(bool notify = true) {
+        GlassCfg.Into(cfg);
+        foreach (var r in refreshers) r();
+        preview.Changed();
+        if (notify && Changed != null) Changed();
+    }
+
+    Point Cell(int col) { return new Point(Ui.P(22) + col * (colW + Ui.P(22)), colY[col]); }
+
+    void Head(int col, string text) {
+        var p = Cell(col);
+        if (colY[col] > preview.Bottom + Ui.P(20)) p.Y += Ui.P(6);
+        var l = new Label { Text = text, AutoSize = true, ForeColor = Ui.Text2, Location = p };
+        Controls.Add(l);
+        colY[col] = p.Y + Ui.P(26);
+    }
+
+    MiniSlider Slider(int col, string label, Func<float> get, Action<float> set, Func<float, string> fmt, Func<bool> enabled) {
+        var p = Cell(col);
+        var l = new Label { Text = label, AutoSize = false, ForeColor = Ui.Text, TextAlign = ContentAlignment.MiddleLeft };
+        l.SetBounds(p.X, p.Y, Ui.P(150), rowH);
+        var val = new Label { AutoSize = false, ForeColor = Ui.Text2, TextAlign = ContentAlignment.MiddleRight };
+        val.SetBounds(p.X + colW - Ui.P(52), p.Y, Ui.P(52), rowH);
+        var s = new MiniSlider { BackColor = Bg };
+        s.SetBounds(p.X + Ui.P(150), p.Y + (rowH - s.Height) / 2, colW - Ui.P(150) - Ui.P(56), s.Height);
+        s.ValueChanged += delegate { set(s.Value); Apply(); };
+        refreshers.Add(() => {
+            s.Value = get();
+            val.Text = fmt(get());
+            bool on = enabled == null || enabled();
+            s.Enabled = on; l.ForeColor = on ? Ui.Text : Ui.Text2;
+        });
+        Controls.Add(l); Controls.Add(s); Controls.Add(val);
+        colY[col] += rowH;
+        return s;
+    }
+
+    void Check(int col, string label, Func<bool> get, Action<bool> set, Func<bool> enabled) {
+        var p = Cell(col);
+        var c = new CheckBox { Text = label, AutoSize = true, ForeColor = Ui.Text };
+        c.Location = new Point(p.X, p.Y + (rowH - c.PreferredSize.Height) / 2);
+        bool busy = false;
+        c.CheckedChanged += delegate { if (busy) return; set(c.Checked); Apply(); };
+        refreshers.Add(() => { busy = true; c.Checked = get(); busy = false; c.Enabled = enabled == null || enabled(); });
+        Controls.Add(c);
+        colY[col] += rowH;
+    }
+
+    void Wave(int col) {
+        var p = Cell(col);
+        var l = new Label { Text = L.T("Velocidad de la ola", "Wave speed"), AutoSize = false, ForeColor = Ui.Text, TextAlign = ContentAlignment.MiddleLeft };
+        l.SetBounds(p.X, p.Y, Ui.P(150), rowH);
+        var cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = Field, ForeColor = Ui.Text };
+        cb.Items.AddRange(new object[] { L.T("Lenta", "Slow"), L.T("Normal", "Normal"), L.T("Rápida", "Fast") });
+        cb.SetBounds(p.X + Ui.P(150), p.Y + Ui.P(3), colW - Ui.P(150), rowH);
+        int[] ms = { 1300, 850, 480 };
+        bool busy = false;
+        cb.SelectedIndexChanged += delegate { if (busy || cb.SelectedIndex < 0) return; GlassCfg.WaveMs = ms[cb.SelectedIndex]; Apply(); };
+        refreshers.Add(() => {
+            busy = true;
+            cb.SelectedIndex = GlassCfg.WaveMs >= 1300 ? 0 : GlassCfg.WaveMs <= 480 ? 2 : 1;
+            busy = false;
+            cb.Enabled = GlassCfg.Light; l.ForeColor = GlassCfg.Light ? Ui.Text : Ui.Text2;
+        });
+        Controls.Add(l); Controls.Add(cb);
+        colY[col] += rowH;
+    }
+
+    static void Flat(Button b, Color bg) {
+        b.FlatStyle = FlatStyle.Flat;
+        b.FlatAppearance.BorderColor = Color.FromArgb(70, 70, 76);
+        b.FlatAppearance.BorderSize = 1;
+        b.BackColor = bg;
+        b.ForeColor = Ui.Text;
+        b.Cursor = Cursors.Hand;
+    }
+
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        Ui.DarkTitle(this);
+        Ui.Backdrop(this, 2, false);
     }
 }
 
@@ -1536,8 +2580,11 @@ class App : ApplicationContext {
     bool stepWaiting, displayOn = true;
     bool announce; // the pending change came from a shortcut: keep the on-screen bar informed until it is applied
     SettingsForm settings;
+    GlassSettingsForm glassForm;
+    string designShown;
 
     public App() {
+        GlassCfg.From(cfg);
         ApplyConfig();
         tray.Icon = Icon.FromHandle(Ui.Sun(SystemInformation.SmallIconSize.Width, Color.White).GetHicon());
         tray.Text = L.T("Brillo del monitor", "Monitor brightness");
@@ -1606,6 +2653,10 @@ class App : ApplicationContext {
     }
 
     void ApplyConfig() {
+        GlassCfg.From(cfg);
+        if (designShown != null && designShown != cfg.Design) { popup.ResetDesign(); osd.ResetDesign(); }
+        else { popup.GlassChanged(); osd.GlassChanged(); }
+        designShown = cfg.Design;
         popup.SetRows(!cfg.HideScreenOff, !cfg.HideSleep, !cfg.HidePlan);
         Ui.Accent = Ui.ParseColor(cfg.Color);
         osd.Seconds = cfg.OsdSegundos;
@@ -1623,6 +2674,18 @@ class App : ApplicationContext {
         var m = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors()), ForeColor = Ui.Text, ShowImageMargin = true };
         m.Items.Add(L.T("Abrir LGBrillo", "Open LGBrillo"), null, delegate { TogglePopup(); });
         m.Items.Add(L.T("Configuración…", "Settings…"), null, delegate { OpenSettings(); });
+        var design = new ToolStripMenuItem(L.T("Diseño", "Design"));
+        var win11 = new ToolStripMenuItem("Windows 11");
+        var liquid = new ToolStripMenuItem("Liquid Glass");
+        win11.Click += delegate { SetDesign("win11"); };
+        liquid.Click += delegate { SetDesign("glass"); };
+        design.DropDownItems.Add(win11);
+        design.DropDownItems.Add(liquid);
+        design.DropDownItems.Add(new ToolStripSeparator());
+        design.DropDownItems.Add(L.T("Ajustes del vidrio…", "Glass settings…"), null, delegate { OpenGlassSettings(); });
+        foreach (ToolStripItem it in design.DropDownItems) it.ForeColor = Ui.Text;
+        ((ToolStripDropDownMenu)design.DropDown).Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors());
+        m.Items.Add(design);
         m.Items.Add(new ToolStripSeparator());
         var start = new ToolStripMenuItem(L.T("Iniciar con Windows", "Start with Windows"));
         start.Click += delegate { SetStartup(!IsStartup()); };
@@ -1638,7 +2701,7 @@ class App : ApplicationContext {
         });
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add(L.T("Salir", "Quit"), null, delegate { Quit(); });
-        m.Opening += delegate { start.Checked = IsStartup(); };
+        m.Opening += delegate { start.Checked = IsStartup(); win11.Checked = cfg.Design != "glass"; liquid.Checked = cfg.Design == "glass"; };
         foreach (ToolStripItem it in m.Items) it.ForeColor = Ui.Text;
         return m;
     }
@@ -1653,11 +2716,29 @@ class App : ApplicationContext {
         else RefreshInput();
     }
 
+    void SetDesign(string d) {
+        if (cfg.Design == d) return;
+        cfg.Design = d;
+        cfg.Save();
+        Log.Write("design " + d);
+        ApplyConfig();
+    }
+
+    void OpenGlassSettings() {
+        popup.Hide();
+        if (glassForm != null && !glassForm.IsDisposed) { glassForm.Activate(); return; }
+        glassForm = new GlassSettingsForm(cfg);
+        glassForm.Changed += delegate { popup.GlassChanged(); osd.GlassChanged(); };
+        glassForm.Show();
+        glassForm.Activate();
+    }
+
     void OpenSettings() {
         popup.Hide();
         if (settings != null && !settings.IsDisposed) { settings.Activate(); return; }
         settings = new SettingsForm(cfg, IsStartup());
         var f = settings;
+        f.AdjustGlass += OpenGlassSettings;
         f.Saved += ipChanged => {
             SetStartup(f.Startup);
             ApplyConfig();

@@ -16,11 +16,16 @@ LG monitors with webOS (such as the UltraGear OLED "Smart" line or the MyView se
 - **HDR indicator**: shows when Windows HDR is on (each picture mode keeps its own brightness).
 - **Windows inactivity**: choose when the display turns off and when the PC sleeps ("Never" at the top), plus a shortcut to "Edit power plan".
 - **Native Windows 11 look**: real Acrylic and Mica backdrops and the Segoe UI Variable font. On Windows 10 the blur is imitated.
+- **Liquid Glass design** (optional, for the panel and the on-screen bar): the desktop behind bends at the edge of the glass with a hint of color separation, plus a lit rim, a specular reflection, an RGB edge and a light that follows the mouse with a wave on click. Blur, darkening, bezel, reflection width and brightness, RGB intensity, hue and spin are all adjustable, with a live preview. Choose it in Settings → Design, or right-click the tray icon → Design.
 - **Settings** (right-click the tray icon): shortcuts, on-screen bar duration and position, shortcut step, bar color, which rows the panel shows, monitor IP and start with Windows.
 
 | On-screen bar | Settings |
 |---|---|
 | ![On-screen bar](docs/shortcut-bar.png) | ![Settings](docs/settings.png) |
+
+| Liquid Glass panel | Liquid Glass on-screen bar |
+|---|---|
+| ![Liquid Glass panel](docs/glass-panel.png) | ![Liquid Glass on-screen bar](docs/glass-bar.png) |
 
 ## Install
 
