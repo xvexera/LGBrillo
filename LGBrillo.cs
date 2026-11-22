@@ -1357,6 +1357,7 @@ abstract class DarkPanel : Form {
     protected readonly GlassSurface surface = new GlassSurface();
     Bitmap buffer, baseLayer, contentLayer; // buffer lives in a DIB section reused by every frame
     bool renderQueued;
+    protected bool baseDirty = true; // the glass layer (plate and buttons) has to be drawn again
     protected readonly Font fTitle = Ui.F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 11f, FontStyle.Regular);
     protected readonly Font fLabel = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9f, FontStyle.Regular);
     protected readonly Font fText = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
@@ -1378,7 +1379,8 @@ abstract class DarkPanel : Form {
             // Live backdrop: about 60 times a second, take again what's behind, blur it and bend it (the dock band of the
             // TV launcher does the same each frame), so moving video or windows show through the glass as they change.
             // The pace adapts to what one update costs (at most half the time), so a big panel never starves clicks.
-            if (Live && Visible && IsHandleCreated && unchecked(Environment.TickCount - lastLive) >= liveEvery) {
+            // Never while the slider is dragged: the bar has to follow the mouse without waiting for a capture.
+            if (Live && Visible && IsHandleCreated && !drag && unchecked(Environment.TickCount - lastLive) >= liveEvery) {
                 lastLive = Environment.TickCount;
                 long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (glass) { BuildGlass(); Render(true); } else { RefreshFrost(); Invalidate(); Update(); }
@@ -1505,6 +1507,7 @@ abstract class DarkPanel : Form {
         try {
             using (var shot = Glass.Capture(new Rectangle(Location, ClientSize)))
                 surface.Build(shot, PlateRect, PlateCorner, Drops);
+            baseDirty = true;
         } finally {
             if (hidden) ExcludeFromCapture(false);
         }
@@ -1579,15 +1582,21 @@ abstract class DarkPanel : Form {
         if (surface.NeedsBuild(size)) { BuildGlass(); full = true; }
         var plate = PlateRect;
         float r = PlateCorner;
-        if (full || baseLayer == null || baseLayer.Size != size || contentLayer == null) {
+        if (baseLayer == null || baseLayer.Size != size) baseDirty = true;
+        if (contentLayer == null || contentLayer.Size != size) full = true;
+        // The glass is drawn again only when it changed (new capture, a button turned on); moving the slider redraws just the content.
+        if (baseDirty) {
+            baseDirty = false;
             Fresh(ref baseLayer, size);
-            Fresh(ref contentLayer, size);
             using (var g = Graphics.FromImage(baseLayer)) {
                 g.Clear(Color.Transparent);
                 Quality(g);
                 using (var path = Ui.RoundRect(plate, r)) surface.Plate(g, path, plate, surface.Lens, false, 1f);
                 PaintGlassInner(g);
             }
+        }
+        if (full) {
+            Fresh(ref contentLayer, size);
             using (var g = Graphics.FromImage(contentLayer)) {
                 g.Clear(Color.Transparent);
                 Quality(g);
@@ -1910,7 +1919,7 @@ class Popup : DarkPanel {
     public bool IsOn(int i) { return on[i]; }
     public void SetHdr(bool supported, bool enabled) { hdrSupported = supported; hdrOn = enabled; Invalidate(); }
     public void SetTimes(string screen, string sl) { screenOff = screen; sleep = sl; Invalidate(); }
-    public void SetButton(int i, bool v) { on[i] = v; Invalidate(); }
+    public void SetButton(int i, bool v) { on[i] = v; baseDirty = true; Invalidate(); }
     public void SetTitle(string t, string s) { title = t; sub = s; Invalidate(); }
     public void SetStatus(string s, bool ok) { status = s; connected = ok; Invalidate(); }
     public void SetInput(string name) { input = name; Invalidate(); }
