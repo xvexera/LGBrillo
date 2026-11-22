@@ -108,11 +108,14 @@ class Config {
     public double GRgbSpeed { get; set; }
     public bool GLight { get; set; }
     public string GWave { get; set; }    // "lenta", "normal" or "rapida"
+    public bool HdrPeak { get; set; }
+    public double HdrStrength { get; set; }
 
     public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF";
         UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down;
         Design = "win11"; GBlur = 0.45; GDarken = 0.3; GRefract = true; GBezel = 0.45; GSpec = true; GSpecWidth = 0.4; GSpecBright = 1;
-        GRgbOn = true; GRgb = 0.35; GRgbHue = 0; GRgbAnim = false; GRgbSpeed = 0.4; GLight = true; GWave = "normal"; }
+        GRgbOn = true; GRgb = 0.35; GRgbHue = 0; GRgbAnim = false; GRgbSpeed = 0.4; GLight = true; GWave = "normal";
+        HdrPeak = true; HdrStrength = 0.6; }
 
     static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LGBrillo"); } }
     static string FilePath { get { return Path.Combine(Dir, "config.json"); } }
@@ -748,9 +751,253 @@ static class Ui {
         return b;
     }
 
+    // White page with dark text: the hardest background for glass, where blur, refraction and darkening are easy to judge.
+    public static Bitmap SampleText(int w, int h) {
+        var b = new Bitmap(w, h, PixelFormat.Format32bppArgb);
+        using (var g = Graphics.FromImage(b))
+        using (var big = F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 20f, FontStyle.Regular))
+        using (var body = F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular))
+        using (var bold = F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 10f, FontStyle.Regular)) {
+            g.Clear(Color.White);
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            string text = L.T(
+                "El vidrio líquido dobla la luz en el borde y desenfoca lo que hay detrás. Sobre una página blanca con texto se ven bien el desenfoque, la refracción del bisel y el oscurecido: ajustalos hasta que la barra se lea cómoda también en los casos extremos. ",
+                "Liquid glass bends the light at its edge and blurs whatever is behind it. On a white page full of text the blur, the bezel refraction and the darkening are easy to see: tune them until the bar is comfortable to read in the extreme cases too. ");
+            float y = P(10);
+            using (var dark = new SolidBrush(Color.FromArgb(20, 20, 24)))
+            using (var grey = new SolidBrush(Color.FromArgb(70, 70, 78)))
+            using (var blue = new SolidBrush(Color.FromArgb(10, 100, 220))) {
+                g.DrawString("Liquid Glass", big, dark, P(14), y);
+                g.DrawString(L.T("Vista previa sobre texto", "Preview over text"), bold, blue, P(14) + g.MeasureString("Liquid Glass  ", big).Width, y + P(10));
+                y += P(36);
+                var rect = new RectangleF(P(14), y, w - P(28), h - y);
+                g.DrawString(text + text + text + text, body, grey, rect);
+            }
+        }
+        return b;
+    }
+
     public static float Toward(float cur, float goal, float k) {
         float n = cur + (goal - cur) * k;
         return Math.Abs(goal - n) < 0.002f ? goal : n;
+    }
+}
+
+// Real HDR peaks. Windows draws GDI windows in SDR, so the bright parts go in a second, click-through window on top,
+// backed by a DirectComposition swap chain in 16-bit float scRGB: there 1.0 = 80 nits and values above the desktop's
+// SDR white really light up brighter on an HDR monitor with Windows HDR on.
+static class HdrPeak {
+    public static bool On = true;
+    public static float Strength = 0.6f;
+    public static bool WindowsHdr; // refreshed by the app when it shows the panel or the display changes
+    public static float SdrWhiteNits = 240f;
+    public static bool Broken;     // DirectX failed once: stay in SDR until the app restarts
+
+    public static bool Active { get { return On && WindowsHdr && !Broken; } }
+
+    // scRGB value of the peak white: up to 4x the SDR white (Strength 1), never above 1000 nits.
+    public static float Scale { get { return Math.Min(1000f, SdrWhiteNits * (1f + 3f * Math.Max(0f, Math.Min(1f, Strength)))) / 80f; } }
+
+    public static void Refresh() {
+        WindowsHdr = Hdr.Enabled();
+        if (WindowsHdr) SdrWhiteNits = Hdr.SdrWhiteNits();
+    }
+}
+
+// Shared Direct3D 11 / DXGI / DirectComposition objects, called through their COM vtables (no extra libraries).
+static class Dx {
+    public static IntPtr Device, Context, Factory, DComp;
+    static bool tried, ok;
+
+    public static readonly Guid IidDxgiDevice = new Guid("54ec77fa-1377-44e6-8c32-88fd5f44c84c");
+    public static readonly Guid IidFactory2 = new Guid("50c83a1c-e072-4c48-87b0-3630fa36a6d0");
+    public static readonly Guid IidSwapChain3 = new Guid("94d99bdb-f1f8-4ab0-b236-7da0170edab1");
+    public static readonly Guid IidTexture2D = new Guid("6f15aaf2-d208-4e89-9ab4-489535d34f9c");
+    public static readonly Guid IidDCompDevice = new Guid("c37ea93a-e7aa-450d-b16f-9746cb0407f3");
+
+    [DllImport("d3d11.dll")] static extern int D3D11CreateDevice(IntPtr adapter, int driverType, IntPtr software, uint flags, IntPtr levels, uint numLevels, uint sdk, out IntPtr device, out int level, out IntPtr context);
+    [DllImport("dcomp.dll")] static extern int DCompositionCreateDevice(IntPtr dxgiDevice, ref Guid iid, out IntPtr device);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct SwapChainDesc1 {
+        public uint Width, Height;
+        public int Format, Stereo;
+        public uint SampleCount, SampleQuality, BufferUsage, BufferCount;
+        public int Scaling, SwapEffect, AlphaMode;
+        public uint Flags;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int OutPtrFn(IntPtr self, out IntPtr result);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int IidOutFn(IntPtr self, ref Guid iid, out IntPtr result);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int CreateSwapFn(IntPtr self, IntPtr device, ref SwapChainDesc1 desc, IntPtr restrict, out IntPtr swap);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int IntFn(IntPtr self, int value);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int TargetFn(IntPtr self, IntPtr hwnd, int topmost, out IntPtr target);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int PtrFn(IntPtr self, IntPtr p);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int NoArgFn(IntPtr self);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int GetBufferFn(IntPtr self, uint index, ref Guid iid, out IntPtr surface);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate void UpdateFn(IntPtr self, IntPtr res, uint sub, IntPtr box, IntPtr data, uint rowPitch, uint depthPitch);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int PresentFn(IntPtr self, uint sync, uint flags);
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)] public delegate int ResizeFn(IntPtr self, uint count, uint w, uint h, int format, uint flags);
+
+    // Method number `slot` of a COM object, as a delegate.
+    public static T Fn<T>(IntPtr obj, int slot) where T : class {
+        IntPtr p = Marshal.ReadIntPtr(Marshal.ReadIntPtr(obj), slot * IntPtr.Size);
+        return Marshal.GetDelegateForFunctionPointer(p, typeof(T)) as T;
+    }
+
+    public static bool Init() {
+        if (tried) return ok;
+        tried = true;
+        IntPtr dxgiDev = IntPtr.Zero, adapter = IntPtr.Zero;
+        try {
+            int level;
+            if (D3D11CreateDevice(IntPtr.Zero, 1, IntPtr.Zero, 0x20, IntPtr.Zero, 0, 7, out Device, out level, out Context) < 0) return false;
+            Guid g = IidDxgiDevice;
+            if (Marshal.QueryInterface(Device, ref g, out dxgiDev) < 0) return false;
+            // The factory that made the device's adapter (IDXGIDevice::GetAdapter, then IDXGIObject::GetParent)
+            if (Fn<OutPtrFn>(dxgiDev, 7)(dxgiDev, out adapter) < 0) return false;
+            g = IidFactory2;
+            if (Fn<IidOutFn>(adapter, 6)(adapter, ref g, out Factory) < 0) return false;
+            g = IidDCompDevice;
+            if (DCompositionCreateDevice(dxgiDev, ref g, out DComp) < 0) return false;
+            ok = true;
+            return true;
+        } catch (Exception ex) {
+            Log.Write("hdr: DirectX unavailable: " + ex.Message);
+            return false;
+        } finally {
+            if (adapter != IntPtr.Zero) Marshal.Release(adapter);
+            if (dxgiDev != IntPtr.Zero) Marshal.Release(dxgiDev);
+            if (!ok) Log.Write("hdr: could not create the DirectX objects, staying in SDR");
+        }
+    }
+}
+
+// Click-through window that shows an RGBA layer on top of a panel, with its white scaled into HDR.
+class HdrOverlay : Form {
+    IntPtr swap, target, visual;
+    int w, h;
+    ushort[] data;
+    GCHandle pin;
+    float tableScale = -1f;
+    readonly ushort[] colorAlpha = new ushort[256 * 256]; // linear color (index) x alpha, as half floats
+    readonly ushort[] alphaHalf = new ushort[256];
+
+    public HdrOverlay() {
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        StartPosition = FormStartPosition.Manual;
+        AutoScaleMode = AutoScaleMode.None;
+        TopMost = true;
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams {
+        get {
+            var cp = base.CreateParams;
+            cp.ExStyle |= 0x00200000 | 0x80 | 0x08000000 | 0x20 | 0x8; // NOREDIRECTIONBITMAP | TOOLWINDOW | NOACTIVATE | TRANSPARENT | TOPMOST
+            return cp;
+        }
+    }
+
+    // Mouse goes to the panel underneath.
+    protected override void WndProc(ref Message m) {
+        if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; } // WM_NCHITTEST -> HTTRANSPARENT
+        base.WndProc(ref m);
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e) { }
+    protected override void OnPaint(PaintEventArgs e) { }
+
+    [StructLayout(LayoutKind.Explicit)] struct FloatBits { [FieldOffset(0)] public float F; [FieldOffset(0)] public int I; }
+
+    static ushort Half(float f) {
+        var u = new FloatBits { F = f };
+        int i = u.I, s = (i >> 16) & 0x8000, e = ((i >> 23) & 0xFF) - 112, m = i & 0x7FFFFF;
+        if (e <= 0) return (ushort)s;              // tiny: zero
+        if (e >= 31) return (ushort)(s | 0x7BFF);  // huge: largest half
+        return (ushort)(s | (e << 10) | (m >> 13));
+    }
+
+    void Tables(float scale) {
+        if (scale == tableScale) return;
+        tableScale = scale;
+        for (int c = 0; c < 256; c++) {
+            double v = c / 255.0;
+            float lin = (float)(v <= 0.04045 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4)) * scale;
+            for (int a = 0; a < 256; a++) colorAlpha[c * 256 + a] = Half(lin * a / 255f);
+        }
+        for (int a = 0; a < 256; a++) alphaHalf[a] = Half(a / 255f);
+    }
+
+    void Alloc() {
+        if (pin.IsAllocated) pin.Free();
+        data = new ushort[w * h * 4];
+        pin = GCHandle.Alloc(data, GCHandleType.Pinned);
+    }
+
+    bool Create(int lw, int lh) {
+        if (!Dx.Init()) return false;
+        var desc = new Dx.SwapChainDesc1 {
+            Width = (uint)lw, Height = (uint)lh, Format = 10, SampleCount = 1, BufferUsage = 0x20, BufferCount = 2,
+            Scaling = 0, SwapEffect = 3, AlphaMode = 1 // R16G16B16A16_FLOAT, render target, flip sequential, premultiplied
+        };
+        if (Dx.Fn<Dx.CreateSwapFn>(Dx.Factory, 24)(Dx.Factory, Dx.Device, ref desc, IntPtr.Zero, out swap) < 0) return false;
+        Guid g = Dx.IidSwapChain3;
+        IntPtr sc3;
+        if (Marshal.QueryInterface(swap, ref g, out sc3) >= 0) {
+            Dx.Fn<Dx.IntFn>(sc3, 38)(sc3, 10); // SetColorSpace1(RGB_FULL_G10_NONE_P709): scRGB
+            Marshal.Release(sc3);
+        }
+        if (Dx.Fn<Dx.TargetFn>(Dx.DComp, 6)(Dx.DComp, Handle, 1, out target) < 0) return false;
+        if (Dx.Fn<Dx.OutPtrFn>(Dx.DComp, 7)(Dx.DComp, out visual) < 0) return false;
+        if (Dx.Fn<Dx.PtrFn>(visual, 15)(visual, swap) < 0) return false;   // SetContent
+        if (Dx.Fn<Dx.PtrFn>(target, 3)(target, visual) < 0) return false;  // SetRoot
+        if (Dx.Fn<Dx.NoArgFn>(Dx.DComp, 3)(Dx.DComp) < 0) return false;    // Commit
+        w = lw; h = lh;
+        Alloc();
+        return true;
+    }
+
+    // layer: plain ARGB in SDR terms; white becomes `scale` in scRGB. Returns false if DirectX failed.
+    public bool Push(Bitmap layer, float scale) {
+        try {
+            int lw = layer.Width, lh = layer.Height;
+            if (swap == IntPtr.Zero) {
+                if (!Create(lw, lh)) { Log.Write("hdr: could not create the HDR layer"); return false; }
+            } else if (lw != w || lh != h) {
+                if (Dx.Fn<Dx.ResizeFn>(swap, 13)(swap, 0, (uint)lw, (uint)lh, 0, 0) < 0) return false;
+                w = lw; h = lh;
+                Alloc();
+            }
+            Tables(scale);
+            int[] px = Glass.Pixels(layer);
+            for (int i = 0, o = 0; i < px.Length; i++, o += 4) {
+                int p = px[i], a = (p >> 24) & 255;
+                if (a == 0) { data[o] = data[o + 1] = data[o + 2] = data[o + 3] = 0; continue; }
+                data[o] = colorAlpha[((p >> 16) & 255) * 256 + a];
+                data[o + 1] = colorAlpha[((p >> 8) & 255) * 256 + a];
+                data[o + 2] = colorAlpha[(p & 255) * 256 + a];
+                data[o + 3] = alphaHalf[a];
+            }
+            Guid g = Dx.IidTexture2D;
+            IntPtr tex;
+            if (Dx.Fn<Dx.GetBufferFn>(swap, 9)(swap, 0, ref g, out tex) < 0) return false;
+            try { Dx.Fn<Dx.UpdateFn>(Dx.Context, 48)(Dx.Context, tex, 0, IntPtr.Zero, pin.AddrOfPinnedObject(), (uint)(w * 8), 0); }
+            finally { Marshal.Release(tex); }
+            return Dx.Fn<Dx.PresentFn>(swap, 8)(swap, 0, 0) >= 0;
+        } catch (Exception ex) {
+            Log.Write("hdr: " + ex.Message);
+            return false;
+        }
+    }
+
+    protected override void Dispose(bool disposing) {
+        if (visual != IntPtr.Zero) { Marshal.Release(visual); visual = IntPtr.Zero; }
+        if (target != IntPtr.Zero) { Marshal.Release(target); target = IntPtr.Zero; }
+        if (swap != IntPtr.Zero) { Marshal.Release(swap); swap = IntPtr.Zero; }
+        if (pin.IsAllocated) pin.Free();
+        base.Dispose(disposing);
     }
 }
 
@@ -984,6 +1231,37 @@ static class Glass {
     }
 }
 
+static class HdrDraw {
+    // The white fill of the glass bar, in HDR, with the sun and the percentage drawn again on top of it.
+    public static void GlassSlider(Graphics g, RectangleF row, int val, Font font) {
+        if (val <= 0) return;
+        float h = row.Height, w = row.Width, shown = Math.Min(100, val) / 100f;
+        float right = Math.Max(row.X + w * shown, row.X + h * Math.Min(1f, shown * 8f));
+        using (var path = Ui.Capsule(row)) {
+            var st = g.Save();
+            g.SetClip(new RectangleF(row.X, row.Y, right - row.X, h), CombineMode.Intersect);
+            using (var b = Glass.Vertical(row, Color.White, Color.FromArgb(0xDD, 0xE1, 0xE6))) g.FillPath(b, path);
+            int s = (int)(h * 0.5f);
+            if (w * shown > h * 0.8f) g.DrawImage(Ui.SunCached(s, Color.FromArgb(255, 28, 28, 30)), row.X + h * 0.5f - s / 2f, row.Y + (h - s) / 2f);
+            if (shown > 0.86f) Ui.DrawText(g, val + "%", font, new RectangleF(row.X, row.Y, w - h * 0.55f, h), Color.FromArgb(28, 28, 30), StringAlignment.Far);
+            g.Restore(st);
+        }
+    }
+
+    // The Windows 11 bar: colored fill and white knob, in HDR.
+    public static void Win11Slider(Graphics g, RectangleF row, int val) {
+        if (val < 0) return;
+        var t = Ui.TrackOf(row);
+        float kw = Ui.P(26), kh = Ui.P(17);
+        float kx = t.X + kw / 2 + (t.Width - kw) * val / 100f;
+        if (kx > t.X)
+            using (var path = Ui.Capsule(new RectangleF(t.X, t.Y, kx - t.X, t.Height)))
+            using (var b = new SolidBrush(Ui.Accent)) g.FillPath(b, path);
+        using (var path = Ui.Capsule(new RectangleF(kx - kw / 2, row.Y + (row.Height - kh) / 2, kw, kh)))
+        using (var b = new SolidBrush(Color.FromArgb(242, 242, 245))) g.FillPath(b, path);
+    }
+}
+
 // Light that follows the pointer and a wave of light on release (iOS 26/27 style), with spring-like easing.
 class GlassLight {
     public PointF Pos, Target, WavePos;
@@ -1185,6 +1463,51 @@ class GlassSurface {
         g.Restore(st);
     }
 
+    // HDR layer: the light and its wave, brighter than SDR white (Liquid Launch's hdrWhite layers).
+    public void LightingHdr(Graphics g, GraphicsPath path, RectangleF rect, float refH, float gain) {
+        float lv = Light.Level * gain;
+        var st = g.Save();
+        g.SetClip(path, CombineMode.Intersect);
+        if (lv > 0.001f) {
+            var lp = Light.Pos;
+            float rad = refH * 1.7f;
+            using (var b = Glass.Radial(lp, rad, new[] { Glass.White(0.30f * lv), Glass.White(0.16f * lv), Glass.White(0f) }, new[] { 0f, 0.45f, 1f }, holder))
+                g.FillEllipse(b, lp.X - rad, lp.Y - rad, 2 * rad, 2 * rad);
+        }
+        float wv = Light.Wave;
+        if (wv < 0.999f) {
+            var wp = Light.WavePos;
+            float far = 0f;
+            foreach (var c in new[] { new PointF(rect.Left, rect.Top), new PointF(rect.Right, rect.Top), new PointF(rect.Left, rect.Bottom), new PointF(rect.Right, rect.Bottom) })
+                far = Math.Max(far, (float)Math.Sqrt((c.X - wp.X) * (c.X - wp.X) + (c.Y - wp.Y) * (c.Y - wp.Y)));
+            float ring = Math.Max(refH * 0.55f, 10f * Ui.S), radius = ring + far * wv;
+            float fd = (float)Math.Pow(1 - wv, 1.15) * gain;
+            float inner = Math.Max(0f, Math.Min(0.98f, (radius - ring) / radius));
+            float mid = Math.Max(inner + 0.005f, Math.Min(0.995f, inner + (1 - inner) * 0.6f));
+            using (var b = Glass.Radial(wp, radius, new[] { Glass.White(0.20f * fd), Glass.White(0.24f * fd), Glass.White(0.45f * fd), Glass.White(0f) },
+                new[] { 0f, inner, mid, 1f }, holder))
+                g.FillEllipse(b, wp.X - radius, wp.Y - radius, 2 * radius, 2 * radius);
+        }
+        g.Restore(st);
+        if (lv > 0.001f)
+            using (var b = Glass.Radial(Light.Pos, refH * 2.2f, new[] { Glass.White(lv), Glass.White(0.3f * lv), Glass.White(0f) }, new[] { 0f, 0.5f, 1f }, holder))
+            using (var p = new Pen(b, 2f * Ui.S)) g.DrawPath(p, path);
+    }
+
+    // HDR layer: the specular reflection of the top edge shines above the screen's white.
+    public void EdgesHdr(Graphics g, GraphicsPath path, RectangleF rect) {
+        if (!GlassCfg.Spec) return;
+        float vx = rect.Width * 0.35f, vy = rect.Height;
+        float tMax = Math.Max(1f, (rect.Width * vx + rect.Height * vy) / (vx * vx + vy * vy));
+        using (var b = new LinearGradientBrush(new PointF(rect.X, rect.Y), new PointF(rect.X + vx * tMax, rect.Y + vy * tMax), Color.White, Color.Transparent)) {
+            var blend = new ColorBlend(4);
+            blend.Colors = new[] { Glass.White(0.75f * Math.Max(0.3f, GlassCfg.SpecBright)), Glass.White(0.18f), Glass.White(0f), Glass.White(0f) };
+            blend.Positions = new[] { 0f, 0.35f / tMax, 0.7f / tMax, 1f };
+            b.InterpolationColors = blend;
+            using (var p = new Pen(b, GlassCfg.SpecWidthPx)) g.DrawPath(p, path);
+        }
+    }
+
     // RGB edge, the rim (strong at the top, faint at the bottom) and the specular reflection along the top-left edge.
     public void Edges(Graphics g, GraphicsPath path, RectangleF rect, float radius, bool bright, bool withRgb, Size win) {
         float amount = withRgb ? GlassCfg.RgbAmount : 0f;
@@ -1223,7 +1546,8 @@ abstract class DarkPanel : Form {
     protected bool acrylic;
     protected bool glass; // Liquid Glass design (decided when the window is created)
     protected readonly GlassSurface surface = new GlassSurface();
-    Bitmap buffer;
+    Bitmap buffer, hdrLayer;
+    HdrOverlay hdr;
     bool renderQueued;
     protected readonly Font fTitle = Ui.F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 11f, FontStyle.Regular);
     protected readonly Font fLabel = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9f, FontStyle.Regular);
@@ -1324,6 +1648,7 @@ abstract class DarkPanel : Form {
     // Switches between the Windows 11 and Liquid Glass designs (the window is rebuilt the next time it shows).
     public void ResetDesign() {
         if (Visible) Hide();
+        if (hdr != null) { hdr.Dispose(); hdr = null; }
         surface.Clear();
         if (frost != null) { frost.Dispose(); frost = null; }
         if (IsHandleCreated) RecreateHandle();
@@ -1351,6 +1676,7 @@ abstract class DarkPanel : Form {
     protected override void OnLocationChanged(EventArgs e) {
         base.OnLocationChanged(e);
         if (glass && Visible) { BuildGlass(); Render(); }
+        else if (hdr != null && !hdr.IsDisposed && hdr.Visible) hdr.Location = Location;
     }
 
     protected override void OnSizeChanged(EventArgs e) {
@@ -1366,7 +1692,58 @@ abstract class DarkPanel : Form {
         BeginInvoke((Action)delegate { renderQueued = false; Render(); });
     }
 
-    protected override void OnPaint(PaintEventArgs e) { if (!glass) PaintContent(e.Graphics); }
+    protected override void OnPaint(PaintEventArgs e) {
+        if (glass) return;
+        PaintContent(e.Graphics);
+        UpdateHdr();
+    }
+
+    protected virtual bool ShowsSlider { get { return true; } }
+
+    // What shines in HDR: the bar, and with glass also the edge reflection and the light.
+    protected virtual void PaintHdr(Graphics g) {
+        if (glass) {
+            var plate = PlateRect;
+            float r = PlateCorner;
+            using (var path = Ui.RoundRect(plate, r)) {
+                if (GlassCfg.Light) surface.LightingHdr(g, path, plate, LightRef, LightGain);
+                surface.EdgesHdr(g, path, plate);
+            }
+        }
+        if (ShowsSlider) {
+            if (glass) HdrDraw.GlassSlider(g, SliderRow, value, fLabel);
+            else HdrDraw.Win11Slider(g, SliderRow, value);
+        }
+    }
+
+    // Draws the HDR parts into their own layer and shows it on top of this window.
+    protected void UpdateHdr() {
+        if (!HdrPeak.Active || !Visible || !IsHandleCreated) { HideHdr(); return; }
+        var size = ClientSize;
+        if (size.Width <= 0 || size.Height <= 0) return;
+        if (hdrLayer == null || hdrLayer.Size != size) {
+            if (hdrLayer != null) hdrLayer.Dispose();
+            hdrLayer = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb);
+        }
+        using (var g = Graphics.FromImage(hdrLayer)) {
+            g.Clear(Color.Transparent);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            PaintHdr(g);
+        }
+        if (hdr == null || hdr.IsDisposed) hdr = new HdrOverlay();
+        if (hdr.Location != Location || hdr.ClientSize != size) hdr.Bounds = new Rectangle(Location, size);
+        if (!hdr.Push(hdrLayer, HdrPeak.Scale)) {
+            HdrPeak.Broken = true;
+            Log.Write("hdr: turned off for this session");
+            HideHdr();
+            return;
+        }
+        if (!hdr.Visible) { hdr.Owner = this; hdr.Show(); }
+    }
+
+    void HideHdr() { if (hdr != null && !hdr.IsDisposed && hdr.Visible) hdr.Hide(); }
 
     void Render() {
         if (!glass || !IsHandleCreated) return;
@@ -1393,6 +1770,7 @@ abstract class DarkPanel : Form {
             PaintContent(g);
         }
         Push(buffer);
+        UpdateHdr();
     }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)] struct Blend { public byte Op, Flags, Alpha, Format; }
@@ -1494,7 +1872,7 @@ abstract class DarkPanel : Form {
 
     protected override void OnVisibleChanged(EventArgs e) {
         base.OnVisibleChanged(e);
-        if (!Visible) { drag = false; hoverSlider = false; grow = 0; surface.Light.Level = surface.Light.Goal = 0f; surface.Light.Wave = 1f; }
+        if (!Visible) { drag = false; hoverSlider = false; grow = 0; surface.Light.Level = surface.Light.Goal = 0f; surface.Light.Wave = 1f; HideHdr(); }
     }
 
     // Rebuilds the native window while hidden: after the display sleeps or changes mode, an old backdrop window can come back blank.
@@ -1525,6 +1903,24 @@ class Popup : DarkPanel {
 
     // Round buttons are drops of glass of their own (GlassCircleButton of Liquid Launch).
     protected override RectangleF[] Drops { get { return new[] { Circle(0), Circle(1), Circle(2) }; } }
+
+    // Buttons that are on shine in HDR, with their icon drawn again on top.
+    protected override void PaintHdr(Graphics g) {
+        base.PaintHdr(g);
+        for (int i = 0; i < 2; i++) {
+            if (!on[i]) continue;
+            var c = Circle(i);
+            using (var path = new GraphicsPath()) {
+                path.AddEllipse(c);
+                if (glass) using (var b = Glass.Vertical(c, Color.White, Color.FromArgb(0xDD, 0xE1, 0xE6))) g.FillPath(b, path);
+                else using (var b = new SolidBrush(Color.FromArgb(245, 245, 247))) g.FillPath(b, path);
+            }
+            var center = new PointF(c.X + c.Width / 2, c.Y + c.Height / 2);
+            var ic = Color.FromArgb(28, 28, 30);
+            if (i == 0) Ui.IconEye(g, center, c.Width * 0.46f, ic);
+            else Ui.IconPixels(g, center, c.Width * 0.46f, ic);
+        }
+    }
 
     protected override void PaintGlassInner(Graphics g) {
         for (int i = 0; i < Labels.Length; i++) {
@@ -1793,6 +2189,8 @@ class Osd : DarkPanel {
         Restart();
     }
 
+    protected override bool ShowsSlider { get { return message == null; } }
+
     protected override void OnMouseDown(MouseEventArgs e) { if (message == null) base.OnMouseDown(e); }
     protected override void OnMouseWheel(MouseEventArgs e) { if (message == null) base.OnMouseWheel(e); }
 
@@ -1854,6 +2252,8 @@ class SettingsForm : Form {
     readonly TextBox ip = new TextBox();
     readonly Button find = new Button(), save = new Button(), cancel = new Button(), adjust = new Button();
     readonly ComboBox design = new ComboBox();
+    readonly CheckBox hdrOn = new CheckBox();
+    readonly MiniSlider hdrLevel = new MiniSlider();
     int y;
     public event Action AdjustGlass;
 
@@ -1888,6 +2288,21 @@ class SettingsForm : Form {
         designBox.Controls.Add(design);
         designBox.Controls.Add(adjust);
         AddRow(L.T("Diseño", "Design"), designBox, Ui.P(216));
+
+        // Real HDR peaks in the bars, lit buttons and the edge of the glass
+        var hdrBox = new Panel { BackColor = Bg, Size = new Size(Ui.P(216), Ui.P(30)) };
+        hdrOn.Text = "HDR";
+        hdrOn.AutoSize = true;
+        hdrOn.Checked = cfg.HdrPeak;
+        hdrOn.Location = new Point(0, (Ui.P(30) - hdrOn.PreferredSize.Height) / 2);
+        hdrLevel.BackColor = Bg;
+        hdrLevel.Value = (float)cfg.HdrStrength;
+        hdrLevel.SetBounds(Ui.P(64), (Ui.P(30) - hdrLevel.Height) / 2, Ui.P(152), hdrLevel.Height);
+        hdrLevel.Enabled = cfg.HdrPeak;
+        hdrOn.CheckedChanged += delegate { hdrLevel.Enabled = hdrOn.Checked; };
+        hdrBox.Controls.Add(hdrOn);
+        hdrBox.Controls.Add(hdrLevel);
+        AddRow(L.T("Brillo HDR en barras y botones", "HDR peak on bars and buttons"), hdrBox, Ui.P(216));
 
         secs.DecimalPlaces = 1; secs.Increment = 0.5M; secs.Minimum = 0.5M; secs.Maximum = 10;
         secs.Value = (decimal)Math.Max(0.5, Math.Min(10, cfg.OsdSegundos));
@@ -1991,6 +2406,8 @@ class SettingsForm : Form {
             cfg.HideSleep = !showSleep.Checked;
             cfg.HidePlan = !showPlan.Checked;
             cfg.Design = design.SelectedIndex == 1 ? "glass" : "win11";
+            cfg.HdrPeak = hdrOn.Checked;
+            cfg.HdrStrength = hdrLevel.Value;
             cfg.Save();
             if (Saved != null) Saved(ipChanged);
             Close();
@@ -2139,7 +2556,7 @@ class GlassPreview : Control {
         var g = e.Graphics;
         if (wall == null || wall.Size != ClientSize) {
             if (wall != null) wall.Dispose();
-            wall = Ui.SampleWallpaper(Math.Max(1, Width), Math.Max(1, Height));
+            wall = Ui.SampleText(Math.Max(1, Width), Math.Max(1, Height));
             surface.Reset();
         }
         g.DrawImageUnscaled(wall, 0, 0);
@@ -2279,6 +2696,7 @@ class GlassSettingsForm : Form {
         GlassCfg.Into(cfg);
         foreach (var r in refreshers) r();
         preview.Changed();
+        preview.Update(); // paint now, also while a slider is being dragged
         if (notify && Changed != null) Changed();
     }
 
@@ -2434,6 +2852,27 @@ static class Hdr {
     [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
     [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint np, [Out] PathInfo[] paths, ref uint nm, [Out] ModeInfo[] modes, IntPtr topology);
     [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref AdvancedColor info);
+
+    [StructLayout(LayoutKind.Sequential)] struct SdrWhite { public uint Type, Size; public Luid Adapter; public uint Id; public uint Level; }
+    [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")] static extern int GetSdrWhite(ref SdrWhite info);
+
+    // Brightness Windows gives to SDR white on the HDR display (the "SDR content brightness" slider), in nits.
+    public static float SdrWhiteNits() {
+        try {
+            uint np, nm;
+            if (GetDisplayConfigBufferSizes(2, out np, out nm) != 0) return 240f;
+            var paths = new PathInfo[np];
+            var modes = new ModeInfo[nm];
+            if (QueryDisplayConfig(2, ref np, paths, ref nm, modes, IntPtr.Zero) != 0) return 240f;
+            for (int i = 0; i < np; i++) {
+                var a = new AdvancedColor { Type = 9, Size = (uint)Marshal.SizeOf(typeof(AdvancedColor)), Adapter = paths[i].Target.Adapter, Id = paths[i].Target.Id };
+                if (DisplayConfigGetDeviceInfo(ref a) != 0 || (a.Value & 2) == 0) continue;
+                var s = new SdrWhite { Type = 11, Size = (uint)Marshal.SizeOf(typeof(SdrWhite)), Adapter = paths[i].Target.Adapter, Id = paths[i].Target.Id };
+                if (GetSdrWhite(ref s) == 0 && s.Level > 0) return s.Level / 1000f * 80f;
+            }
+        } catch { }
+        return 240f;
+    }
 
     public static bool Enabled() {
         try {
@@ -2596,8 +3035,9 @@ class App : ApplicationContext {
         popup.SetButton(0, cfg.EyeCare);
         popup.SetButton(1, cfg.PixelRefresh);
         RefreshTimes();
-        popup.SetHdr(Hdr.Enabled());
-        SystemEvents.DisplaySettingsChanged += delegate { popup.SetHdr(Hdr.Enabled()); osd.ResetWindow(); popup.ResetWindow(); };
+        HdrPeak.Refresh();
+        popup.SetHdr(HdrPeak.WindowsHdr);
+        SystemEvents.DisplaySettingsChanged += delegate { HdrPeak.Refresh(); popup.SetHdr(HdrPeak.WindowsHdr); osd.ResetWindow(); popup.ResetWindow(); };
         SystemEvents.PowerModeChanged += (s, e) => { if (e.Mode == PowerModes.Resume) { Log.Write("pc resumed"); Wake(); } };
         hk.DisplayPower += on => {
             if (on == displayOn) return;
@@ -2654,6 +3094,8 @@ class App : ApplicationContext {
 
     void ApplyConfig() {
         GlassCfg.From(cfg);
+        HdrPeak.On = cfg.HdrPeak;
+        HdrPeak.Strength = (float)cfg.HdrStrength;
         if (designShown != null && designShown != cfg.Design) { popup.ResetDesign(); osd.ResetDesign(); }
         else { popup.GlassChanged(); osd.GlassChanged(); }
         designShown = cfg.Design;
@@ -2709,7 +3151,8 @@ class App : ApplicationContext {
     void TogglePopup() {
         if (popup.Visible) { popup.Hide(); return; }
         if (unchecked(Environment.TickCount - popup.HiddenAt) < 250) return; // the click that closed it
-        popup.SetHdr(Hdr.Enabled());
+        HdrPeak.Refresh();
+        popup.SetHdr(HdrPeak.WindowsHdr);
         RefreshTimes();
         popup.ShowNear(Cursor.Position);
         if (!tv.Connected) { var _ = EnsureConnected(); }
