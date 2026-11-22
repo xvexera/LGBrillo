@@ -110,12 +110,19 @@ class Config {
     public string GWave { get; set; }    // "lenta", "normal" or "rapida"
     public bool HdrPeak { get; set; }
     public double HdrStrength { get; set; }
+    public bool HdrBar { get; set; }
+    public bool HdrButtons { get; set; }
+    public bool HdrEdge { get; set; }
+    public bool HdrLight { get; set; }
+    public bool HdrInPanel { get; set; }
+    public bool HdrInOsd { get; set; }
 
     public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF";
         UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down;
         Design = "win11"; GBlur = 0.45; GDarken = 0.3; GRefract = true; GBezel = 0.45; GSpec = true; GSpecWidth = 0.4; GSpecBright = 1;
         GRgbOn = true; GRgb = 0.35; GRgbHue = 0; GRgbAnim = false; GRgbSpeed = 0.4; GLight = true; GWave = "normal";
-        HdrPeak = true; HdrStrength = 0.6; }
+        HdrPeak = true; HdrStrength = 0.6;
+        HdrBar = true; HdrButtons = true; HdrEdge = true; HdrLight = true; HdrInPanel = true; HdrInOsd = true; }
 
     static string Dir { get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "LGBrillo"); } }
     static string FilePath { get { return Path.Combine(Dir, "config.json"); } }
@@ -809,6 +816,7 @@ static class HdrPeak {
     public static bool WindowsHdr; // refreshed by the app when it shows the panel or the display changes
     public static float SdrWhiteNits = 240f;
     public static bool Broken;     // DirectX failed once: stay in SDR until the app restarts
+    public static bool Bar = true, Buttons = true, Edge = true, Light = true, InPanel = true, InOsd = true;
 
     public static bool Active { get { return On && WindowsHdr && !Broken; } }
 
@@ -1714,14 +1722,26 @@ abstract class DarkPanel : Form {
         }
     }
 
+    bool moving;
+
+    // Moves and resizes in one go, rebuilding the glass once (not once for the move and again for the size).
+    protected void MoveResize(Rectangle r) {
+        moving = true;
+        try { Bounds = r; } finally { moving = false; }
+        if (glass && Visible) { BuildGlass(); Render(); }
+        else Invalidate();
+    }
+
     protected override void OnLocationChanged(EventArgs e) {
         base.OnLocationChanged(e);
+        if (moving) return;
         if (glass && Visible) { BuildGlass(); Render(); }
         else if (hdr != null && !hdr.IsDisposed && hdr.IsShown) hdr.Location = Location;
     }
 
     protected override void OnSizeChanged(EventArgs e) {
         base.OnSizeChanged(e);
+        if (moving) return;
         if (glass && Visible) { BuildGlass(); Render(); }
     }
 
@@ -1740,6 +1760,7 @@ abstract class DarkPanel : Form {
     }
 
     protected virtual bool ShowsSlider { get { return true; } }
+    protected virtual bool HdrHere { get { return true; } }
 
     // What shines in HDR: the bar, and with glass also the edge reflection and the light.
     protected virtual void PaintHdr(Graphics g) {
@@ -1747,11 +1768,11 @@ abstract class DarkPanel : Form {
             var plate = PlateRect;
             float r = PlateCorner;
             using (var path = Ui.RoundRect(plate, r)) {
-                if (GlassCfg.Light) surface.LightingHdr(g, path, plate, LightRef, LightGain);
-                surface.EdgesHdr(g, path, plate);
+                if (GlassCfg.Light && HdrPeak.Light) surface.LightingHdr(g, path, plate, LightRef, LightGain);
+                if (HdrPeak.Edge) surface.EdgesHdr(g, path, plate);
             }
         }
-        if (ShowsSlider) {
+        if (ShowsSlider && HdrPeak.Bar) {
             if (glass) HdrDraw.GlassSlider(g, SliderRow, value, fLabel);
             else HdrDraw.Win11Slider(g, SliderRow, value);
         }
@@ -1759,7 +1780,7 @@ abstract class DarkPanel : Form {
 
     // Draws the HDR parts into their own layer and shows it on top of this window.
     protected void UpdateHdr() {
-        if (!HdrPeak.Active || !Visible || !IsHandleCreated) { HideHdr(); return; }
+        if (!HdrPeak.Active || !HdrHere || !Visible || !IsHandleCreated) { HideHdr(); return; }
         var size = ClientSize;
         if (size.Width <= 0 || size.Height <= 0) return;
         if (hdrLayer == null || hdrLayer.Size != size) {
@@ -1941,18 +1962,28 @@ class Popup : DarkPanel {
     int hot = -1;
     string title = L.T("Monitor LG", "LG monitor"), sub = "", status = L.T("Conectando…", "Connecting…"), input = "—";
     string screenOff = "—", sleep = "—";
-    public const int RowScreen = 10, RowSleep = 11, RowPlan = 12;
+    public const int RowScreen = 10, RowSleep = 11, RowPlan = 12, ItemHdr = 20, ChipBase = 100, ExpandInput = 2;
     bool connected, hdr;
+    RectangleF badge;
     public int HiddenAt;
     public event Action<int> ButtonClicked;
-    public bool MenuOpen;
+    public event Action<int, int> ChoiceClicked; // which list (ExpandInput, RowScreen, RowSleep) and the option
+    public event Action HdrClicked;
+
+    // Options shown when the input button or a time row is expanded inside the panel.
+    public class Choice { public string Text; public bool Selected, Dim; }
+    int expanded = -1;
+    List<Choice> choices = new List<Choice>();
+    public int Expanded { get { return expanded; } }
 
     // Round buttons are drops of glass of their own (GlassCircleButton of Liquid Launch).
     protected override RectangleF[] Drops { get { return new[] { Circle(0), Circle(1), Circle(2) }; } }
+    protected override bool HdrHere { get { return HdrPeak.InPanel; } }
 
     // Buttons that are on shine in HDR, with their icon drawn again on top.
     protected override void PaintHdr(Graphics g) {
         base.PaintHdr(g);
+        if (!HdrPeak.Buttons) return;
         for (int i = 0; i < 2; i++) {
             if (!on[i]) continue;
             var c = Circle(i);
@@ -1987,14 +2018,14 @@ class Popup : DarkPanel {
         // Close when the focus really went to another window (checked a moment later: a brief focus change, like the
         // HDR layer appearing, must not close the panel).
         Deactivate += delegate {
-            if (MenuOpen) return;
             BeginInvoke((Action)delegate {
                 IntPtr fg = GetForegroundWindow();
-                if (!Visible || MenuOpen || fg == Handle || IsOwnOverlay(fg) || ContainsFocus) return;
+                if (!Visible || fg == Handle || IsOwnOverlay(fg) || ContainsFocus) return;
                 Hide();
                 HiddenAt = Environment.TickCount;
             });
         };
+        VisibleChanged += delegate { if (!Visible && expanded >= 0) { expanded = -1; choices = new List<Choice>(); Relayout(); } };
     }
 
     protected override CreateParams CreateParams {
@@ -2021,25 +2052,84 @@ class Popup : DarkPanel {
 
     bool RowOn(int item) { return rows[item - RowScreen]; }
 
-    // Bottom rows, stacked according to which ones are visible.
+    // ---- Layout, in dp (Ui.P turns it into pixels). The expanded list pushes down what comes after it.
+    int Cols { get { return expanded == ExpandInput ? 2 : 4; } }
+    const float ChipH = 28, Gap = 6;
+
+    float ChipsHeight {
+        get {
+            if (expanded < 0 || choices.Count == 0) return 0;
+            int n = (choices.Count + Cols - 1) / Cols;
+            return n * (ChipH + Gap) - Gap + 14;
+        }
+    }
+
+    float InputExtra { get { return expanded == ExpandInput ? ChipsHeight + 4 : 0; } }
+    float RowExtra(int item) { return expanded == item ? ChipsHeight : 0; }
+
     float RowY(int item) {
-        int n = 0;
-        if (item != RowScreen && rows[0]) n++;
-        if (item == RowPlan && rows[1]) n++;
-        return 206 + 36 * n + (item == RowPlan && n > 0 ? 4 : 0);
+        float y = 206 + InputExtra;
+        foreach (int r in new[] { RowScreen, RowSleep }) {
+            if (r == item) return y;
+            if (RowOn(r)) y += 36 + RowExtra(r);
+        }
+        return y + (rows[0] || rows[1] ? 4 : 0);
     }
 
     RectangleF Row(int item) {
         return new RectangleF(Ui.P(8), Ui.P(RowY(item)), W - Ui.P(16), Ui.P(item == RowPlan ? 30 : 34));
     }
 
+    float ChipsTop { get { return expanded == ExpandInput ? 194 : RowY(expanded) + 34; } }
+
+    RectangleF ChipsArea { get { return new RectangleF(Ui.P(10), Ui.P(ChipsTop + 2), W - Ui.P(20), Ui.P(ChipsHeight - 4)); } }
+
+    RectangleF Chip(int i) {
+        int cols = Cols;
+        float wdp = W / Ui.S, padX = 16;
+        float cw = (wdp - 2 * padX - Gap * (cols - 1)) / cols;
+        int row = i / cols, col = i % cols;
+        return new RectangleF(Ui.P(padX + col * (cw + Gap)), Ui.P(ChipsTop + 7 + row * (ChipH + Gap)), Ui.P(cw), Ui.P(ChipH));
+    }
+
+    float BottomDp {
+        get {
+            float bottom = 198 + InputExtra;
+            foreach (int r in new[] { RowScreen, RowSleep, RowPlan })
+                if (RowOn(r)) bottom = RowY(r) + (r == RowPlan ? 30 : 34) + RowExtra(r) + 6;
+            return bottom;
+        }
+    }
+
+    // New height; while it's on screen the edge next to the taskbar stays where it is.
+    void Relayout() {
+        int h = Ui.P(BottomDp);
+        if (h != ClientSize.Height) {
+            if (Visible) {
+                var wa = Screen.FromControl(this).WorkingArea;
+                bool keepBottom = Top + Height / 2 > wa.Top + wa.Height / 2;
+                int top = keepBottom ? Bottom - h : Top;
+                top = Math.Max(wa.Top + Ui.P(8), Math.Min(top, wa.Bottom - h - Ui.P(8)));
+                MoveResize(new Rectangle(Left, top, Width, h));
+            } else ClientSize = new Size(ClientSize.Width, h);
+        }
+        Invalidate();
+    }
+
     public void SetRows(bool screen, bool sl, bool plan) {
         rows[0] = screen; rows[1] = sl; rows[2] = plan;
-        float bottom = 198;
-        foreach (int r in new[] { RowScreen, RowSleep, RowPlan })
-            if (RowOn(r)) bottom = RowY(r) + (r == RowPlan ? 30 : 34) + 6;
-        ClientSize = new Size(ClientSize.Width, Ui.P(bottom));
-        Invalidate();
+        if (expanded >= RowScreen && !RowOn(expanded)) { expanded = -1; choices = new List<Choice>(); }
+        Relayout();
+    }
+
+    public void Expand(int item, List<Choice> list) { expanded = item; choices = list; hot = -1; Relayout(); }
+
+    public void Collapse() {
+        if (expanded < 0) return;
+        expanded = -1;
+        choices = new List<Choice>();
+        hot = -1;
+        Relayout();
     }
 
     public bool IsOn(int i) { return on[i]; }
@@ -2049,22 +2139,6 @@ class Popup : DarkPanel {
     public void SetStatus(string s, bool ok) { status = s; connected = ok; Invalidate(); }
     public void SetHdr(bool v) { hdr = v; Invalidate(); }
     public void SetInput(string name) { input = name; Invalidate(); }
-
-    // Shows a menu under a button or row, keeping the panel open while the menu is open.
-    public void ShowMenu(int i, ContextMenuStrip m) {
-        MenuOpen = true;
-        m.Closed += delegate {
-            MenuOpen = false;
-            if (Form.ActiveForm != this) { Hide(); HiddenAt = Environment.TickCount; }
-        };
-        if (i < Labels.Length) {
-            var c = Circle(i);
-            m.Show(this, new Point((int)c.X - Ui.P(20), (int)c.Bottom + Ui.P(6)));
-        } else {
-            var r = Row(i);
-            m.Show(this, new Point((int)r.Right - m.GetPreferredSize(Size.Empty).Width, (int)r.Bottom + Ui.P(2)));
-        }
-    }
 
     public void ShowNear(Point p) {
         var wa = Screen.FromPoint(p).WorkingArea;
@@ -2078,6 +2152,8 @@ class Popup : DarkPanel {
     }
 
     int Hit(Point p) {
+        if (hdr && badge.Contains(p)) return ItemHdr;
+        for (int i = 0; i < choices.Count && expanded >= 0; i++) if (Chip(i).Contains(p)) return ChipBase + i;
         for (int i = 0; i < Labels.Length; i++) if (Column(i).Contains(p)) return i;
         foreach (int r in new[] { RowScreen, RowSleep, RowPlan }) if (RowOn(r) && Row(r).Contains(p)) return r;
         return -1;
@@ -2091,7 +2167,9 @@ class Popup : DarkPanel {
 
     protected override void ItemClick(Point p) {
         int h = Hit(p);
-        if (h >= 0 && ButtonClicked != null) ButtonClicked(h);
+        if (h >= ChipBase) { if (ChoiceClicked != null) ChoiceClicked(expanded, h - ChipBase); }
+        else if (h == ItemHdr) { if (HdrClicked != null) HdrClicked(); }
+        else if (h >= 0 && ButtonClicked != null) ButtonClicked(h);
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys k) {
@@ -2103,9 +2181,38 @@ class Popup : DarkPanel {
             case Keys.PageUp: SlideTo(b + 10); return true;
             case Keys.Home: SlideTo(0); return true;
             case Keys.End: SlideTo(100); return true;
-            case Keys.Escape: Hide(); return true;
+            case Keys.Escape: if (expanded >= 0) Collapse(); else Hide(); return true;
         }
         return base.ProcessCmdKey(ref msg, k);
+    }
+
+    static void ChevronUp(Graphics g, PointF c, float s, Color col) {
+        using (var p = new Pen(col, Math.Max(1.4f, 1.6f * Ui.S)) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+            g.DrawLines(p, new[] { new PointF(c.X - s * 0.5f, c.Y + s * 0.22f), new PointF(c.X, c.Y - s * 0.25f), new PointF(c.X + s * 0.5f, c.Y + s * 0.22f) });
+    }
+
+    void PaintChips(Graphics g) {
+        if (expanded < 0 || choices.Count == 0) return;
+        using (var path = Ui.RoundRect(ChipsArea, Ui.P(12)))
+        using (var b = new SolidBrush(Color.FromArgb(glass ? 22 : 14, 255, 255, 255))) g.FillPath(b, path);
+        for (int i = 0; i < choices.Count; i++) {
+            var c = choices[i];
+            var r = Chip(i);
+            bool hov = hot == ChipBase + i;
+            Color fill, text;
+            if (c.Selected) {
+                fill = glass ? Color.FromArgb(235, 245, 245, 247) : Ui.Accent;
+                text = glass || Ui.Accent.GetBrightness() > 0.6f ? Color.FromArgb(28, 28, 30) : Color.White;
+            } else {
+                fill = Color.FromArgb(hov ? 60 : (glass ? 30 : 24), 255, 255, 255);
+                text = c.Dim ? Ui.Text2 : Ui.Text;
+            }
+            using (var path = Ui.Capsule(r)) {
+                using (var b = new SolidBrush(fill)) g.FillPath(b, path);
+                if (!c.Selected) using (var p = new Pen(Color.FromArgb(glass ? 46 : 30, 255, 255, 255), 1)) g.DrawPath(p, path);
+            }
+            Ui.DrawText(g, c.Text, fSmall, r, text, StringAlignment.Center);
+        }
     }
 
     protected override void PaintContent(Graphics g) {
@@ -2117,16 +2224,19 @@ class Popup : DarkPanel {
         float tw = Math.Min(g.MeasureString(title, fTitle, PointF.Empty, StringFormat.GenericTypographic).Width, W - 2 * pad - Ui.P(100));
         Ui.DrawText(g, title, fTitle, new RectangleF(pad, Ui.P(12), tw + Ui.P(4), Ui.P(24)), Ui.Text, StringAlignment.Near);
         if (hdr) {
-            var br = new RectangleF(pad + tw + Ui.P(10), Ui.P(16), Ui.P(34), Ui.P(17));
-            using (var path = Ui.RoundRect(br, Ui.P(5)))
-            using (var b = new SolidBrush(Color.FromArgb(255, 214, 10)))
-                g.FillPath(b, path);
-            Ui.DrawText(g, "HDR", fBadge, br, Color.FromArgb(28, 28, 30), StringAlignment.Center);
-        }
+            // The HDR badge turns the app's HDR effects on and off
+            badge = new RectangleF(pad + tw + Ui.P(10), Ui.P(16), Ui.P(34), Ui.P(17));
+            var yellow = Color.FromArgb(255, 214, 10);
+            using (var path = Ui.RoundRect(badge, Ui.P(5))) {
+                if (HdrPeak.On) using (var b = new SolidBrush(hot == ItemHdr ? Color.FromArgb(255, 226, 80) : yellow)) g.FillPath(b, path);
+                else using (var p = new Pen(Color.FromArgb(hot == ItemHdr ? 230 : 150, yellow), Math.Max(1f, 1.2f * Ui.S))) g.DrawPath(p, path);
+            }
+            Ui.DrawText(g, "HDR", fBadge, badge, HdrPeak.On ? Color.FromArgb(28, 28, 30) : Color.FromArgb(200, yellow), StringAlignment.Center);
+        } else badge = RectangleF.Empty;
         if (value >= 0 && !glass) // the glass bar shows it inside
             Ui.DrawText(g, value + "%", fSmall, new RectangleF(W - pad - Ui.P(50), Ui.P(12), Ui.P(50), Ui.P(24)), Ui.Text2, StringAlignment.Far);
         string s = sub;
-        if (hdr) s += L.T(" · HDR activo en Windows", " · HDR on in Windows");
+        if (hdr) s += HdrPeak.On ? L.T(" · HDR activo en Windows", " · HDR on in Windows") : L.T(" · efectos HDR apagados", " · HDR effects off");
         if (!connected) s = sub == "" ? status : sub + " · " + status;
         Ui.DrawText(g, s, fSmall, new RectangleF(pad, Ui.P(34), W - 2 * pad, Ui.P(18)), Ui.Text2, StringAlignment.Near);
 
@@ -2135,10 +2245,12 @@ class Popup : DarkPanel {
         for (int i = 0; i < Labels.Length; i++) {
             var c = Circle(i);
             var center = new PointF(c.X + c.Width / 2, c.Y + c.Height / 2);
+            bool open = i == ExpandInput && expanded == ExpandInput;
             if (!glass) { // in glass the drop was painted with the glass, under the light
-                var fill = on[i] ? Color.FromArgb(245, 245, 247) : Color.FromArgb(hot == i ? 58 : 38, 255, 255, 255);
+                var fill = on[i] ? Color.FromArgb(245, 245, 247) : Color.FromArgb(hot == i || open ? 58 : 38, 255, 255, 255);
                 using (var b = new SolidBrush(fill)) g.FillEllipse(b, c);
-            }
+            } else if (open)
+                using (var b = new SolidBrush(Color.FromArgb(40, 255, 255, 255))) g.FillEllipse(b, c);
             var ic = on[i] ? Color.FromArgb(28, 28, 30) : Ui.Text;
             float sz = c.Width * 0.46f;
             if (i == 0) Ui.IconEye(g, center, sz, ic);
@@ -2151,15 +2263,15 @@ class Popup : DarkPanel {
         }
 
         using (var p = new Pen(Ui.Line, 1)) {
-            if (rows[0] || rows[1] || rows[2]) g.DrawLine(p, pad, Ui.P(200), W - pad, Ui.P(200));
+            if (rows[0] || rows[1] || rows[2]) g.DrawLine(p, pad, Ui.P(200 + InputExtra), W - pad, Ui.P(200 + InputExtra));
             if (rows[2] && (rows[0] || rows[1])) g.DrawLine(p, pad, Ui.P(RowY(RowPlan) - 3), W - pad, Ui.P(RowY(RowPlan) - 3));
         }
         foreach (int item in new[] { RowScreen, RowSleep, RowPlan }) {
             if (!RowOn(item)) continue;
             var r = Row(item);
-            if (hot == item)
+            if (hot == item || expanded == item)
                 using (var path = Ui.RoundRect(r, Ui.P(8)))
-                using (var b = new SolidBrush(Color.FromArgb(20, 255, 255, 255)))
+                using (var b = new SolidBrush(Color.FromArgb(expanded == item ? 26 : 20, 255, 255, 255)))
                     g.FillPath(b, path);
             var txt = new RectangleF(r.X + Ui.P(10), r.Y, r.Width * 0.6f, r.Height);
             float cx = r.Right - Ui.P(16), cy = r.Y + r.Height / 2;
@@ -2170,8 +2282,10 @@ class Popup : DarkPanel {
             }
             Ui.DrawText(g, item == RowScreen ? L.T("Apagar pantalla", "Turn off display") : L.T("Suspender PC", "Sleep PC"), fText, txt, Ui.Text, StringAlignment.Near);
             Ui.DrawText(g, item == RowScreen ? screenOff : sleep, fSmall, new RectangleF(r.X, r.Y, r.Width - Ui.P(32), r.Height), Ui.Text2, StringAlignment.Far);
-            Ui.ChevronDown(g, new PointF(cx, cy), Ui.P(8), Ui.Text2);
+            if (expanded == item) ChevronUp(g, new PointF(cx, cy), Ui.P(8), Ui.Text);
+            else Ui.ChevronDown(g, new PointF(cx, cy), Ui.P(8), Ui.Text2);
         }
+        PaintChips(g);
     }
 }
 
@@ -2251,6 +2365,7 @@ class Osd : DarkPanel {
     }
 
     protected override bool ShowsSlider { get { return message == null; } }
+    protected override bool HdrHere { get { return HdrPeak.InOsd; } }
 
     protected override void OnMouseDown(MouseEventArgs e) { if (message == null) base.OnMouseDown(e); }
     protected override void OnMouseWheel(MouseEventArgs e) { if (message == null) base.OnMouseWheel(e); }
@@ -2299,27 +2414,246 @@ class Swatches : Control {
     }
 }
 
+// ---------------------------------------------------------------- Windows 11 style controls for the settings window
+
+static class Theme {
+    public static readonly Color Window = Color.FromArgb(32, 32, 32);
+    public static readonly Color Card = Color.FromArgb(43, 43, 43);
+    public static readonly Color CardLine = Color.FromArgb(55, 55, 55);
+    public static readonly Color Field = Color.FromArgb(56, 56, 58);
+    public static readonly Color Text = Color.FromArgb(245, 245, 247);
+    public static readonly Color Text2 = Color.FromArgb(160, 160, 166);
+}
+
+// On/off switch, like the ones in Windows 11 Settings.
+class ToggleSwitch : Control {
+    bool on;
+    float pos;
+    readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
+    public event EventHandler CheckedChanged;
+
+    public ToggleSwitch() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable, true);
+        Size = new Size(Ui.P(40), Ui.P(20));
+        Cursor = Cursors.Hand;
+        anim.Tick += delegate {
+            pos = Ui.Toward(pos, on ? 1f : 0f, 0.3f);
+            if (pos == (on ? 1f : 0f)) anim.Stop();
+            Invalidate();
+        };
+    }
+
+    public bool Checked {
+        get { return on; }
+        set {
+            if (on == value) return;
+            on = value;
+            anim.Start();
+            if (CheckedChanged != null) CheckedChanged(this, EventArgs.Empty);
+        }
+    }
+
+    public void SetChecked(bool v) { on = v; pos = v ? 1 : 0; Invalidate(); }
+
+    protected override void OnClick(EventArgs e) { if (Enabled) { Focus(); Checked = !Checked; } }
+    protected override void OnKeyDown(KeyEventArgs e) { if (e.KeyCode == Keys.Space && Enabled) Checked = !Checked; }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(BackColor);
+        int a = Enabled ? 255 : 90;
+        var r = new RectangleF(1, 1, Width - 2, Height - 2);
+        using (var path = Ui.Capsule(r)) {
+            if (pos > 0.01f) using (var b = new SolidBrush(Color.FromArgb((int)(a * pos), Ui.Accent))) g.FillPath(b, path);
+            if (pos < 0.99f) using (var p = new Pen(Color.FromArgb((int)(a * (1 - pos) * 0.75f), 210, 210, 214), Math.Max(1f, Ui.S))) g.DrawPath(p, path);
+        }
+        float kr = r.Height * (0.24f + 0.08f * pos);
+        float kx = r.X + r.Height / 2 + (r.Width - r.Height) * pos, ky = r.Y + r.Height / 2;
+        var kc = pos > 0.5f ? (Ui.Accent.GetBrightness() > 0.7f ? Color.FromArgb(a, 28, 28, 30) : Color.FromArgb(a, 255, 255, 255)) : Color.FromArgb(a, 205, 205, 210);
+        using (var b = new SolidBrush(kc)) g.FillEllipse(b, kx - kr, ky - kr, 2 * kr, 2 * kr);
+    }
+}
+
+// A row of options where one is chosen (Windows 11 segmented control).
+class Segmented : Control {
+    readonly string[] items;
+    int sel, hover = -1;
+    public event EventHandler SelectedChanged;
+
+    public Segmented(params string[] items) {
+        this.items = items;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Height = Ui.P(32);
+        Cursor = Cursors.Hand;
+        Font = Ui.F("Segoe UI Variable Text", "Segoe UI", 9.5f, FontStyle.Regular);
+    }
+
+    public int Selected {
+        get { return sel; }
+        set { sel = Math.Max(0, Math.Min(items.Length - 1, value)); Invalidate(); }
+    }
+
+    int At(int x) { return Math.Max(0, Math.Min(items.Length - 1, x * items.Length / Math.Max(1, Width))); }
+
+    protected override void OnMouseMove(MouseEventArgs e) { int h = At(e.X); if (h != hover) { hover = h; Invalidate(); } }
+    protected override void OnMouseLeave(EventArgs e) { hover = -1; Invalidate(); }
+    protected override void OnMouseDown(MouseEventArgs e) {
+        int i = At(e.X);
+        if (i == sel) return;
+        sel = i;
+        Invalidate();
+        if (SelectedChanged != null) SelectedChanged(this, EventArgs.Empty);
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        g.Clear(BackColor);
+        var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        using (var path = Ui.RoundRect(r, Ui.P(6)))
+        using (var b = new SolidBrush(Theme.Field)) g.FillPath(b, path);
+        float w = r.Width / items.Length;
+        for (int i = 0; i < items.Length; i++) {
+            var cell = new RectangleF(r.X + w * i + Ui.P(3), r.Y + Ui.P(3), w - Ui.P(6), r.Height - Ui.P(6));
+            if (i == sel)
+                using (var path = Ui.RoundRect(cell, Ui.P(4)))
+                using (var b = new SolidBrush(Ui.Accent)) g.FillPath(b, path);
+            else if (i == hover)
+                using (var path = Ui.RoundRect(cell, Ui.P(4)))
+                using (var b = new SolidBrush(Color.FromArgb(22, 255, 255, 255))) g.FillPath(b, path);
+            var tc = i == sel ? (Ui.Accent.GetBrightness() > 0.6f ? Color.FromArgb(28, 28, 30) : Color.White) : Theme.Text2;
+            Ui.DrawText(g, items[i], Font, cell, tc, StringAlignment.Center);
+        }
+    }
+}
+
+// Flat rounded button; Accent = the main action.
+class ModernButton : Control {
+    public bool Accent;
+    bool hover, down;
+
+    public ModernButton(string text, bool accent) {
+        Text = text;
+        Accent = accent;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.Selectable | ControlStyles.ResizeRedraw, true);
+        Cursor = Cursors.Hand;
+        Size = new Size(Ui.P(110), Ui.P(32));
+        Font = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
+    }
+
+    protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); }
+    protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); }
+    protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); }
+    protected override void OnMouseUp(MouseEventArgs e) { down = false; Invalidate(); }
+    protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
+    protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        g.Clear(BackColor);
+        var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        Color fill = Accent ? Ui.Accent : Theme.Field;
+        if (down) fill = Color.FromArgb(Math.Max(0, fill.R - 25), Math.Max(0, fill.G - 25), Math.Max(0, fill.B - 25));
+        else if (hover) fill = Color.FromArgb(Math.Min(255, fill.R + 18), Math.Min(255, fill.G + 18), Math.Min(255, fill.B + 18));
+        if (!Enabled) fill = Color.FromArgb(120, fill);
+        using (var path = Ui.RoundRect(r, Ui.P(6))) {
+            using (var b = new SolidBrush(fill)) g.FillPath(b, path);
+            if (!Accent) using (var p = new Pen(Color.FromArgb(28, 255, 255, 255), 1)) g.DrawPath(p, path);
+        }
+        var tc = Accent && Ui.Accent.GetBrightness() > 0.6f ? Color.FromArgb(28, 28, 30) : Theme.Text;
+        Ui.DrawText(g, Text, Font, r, Enabled ? tc : Theme.Text2, StringAlignment.Center);
+    }
+}
+
+// Rounded box around a text field.
+class FieldBox : Panel {
+    public readonly TextBox Box;
+
+    public FieldBox(TextBox box, int width) {
+        Box = box;
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        Size = new Size(width, Ui.P(32));
+        box.BorderStyle = BorderStyle.None;
+        box.BackColor = Theme.Field;
+        box.ForeColor = Theme.Text;
+        box.SetBounds(Ui.P(10), (Height - box.PreferredHeight) / 2, width - Ui.P(20), box.PreferredHeight);
+        Controls.Add(box);
+        box.GotFocus += delegate { Invalidate(); };
+        box.LostFocus += delegate { Invalidate(); };
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Parent != null ? Parent.BackColor : Theme.Card);
+        var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        using (var path = Ui.RoundRect(r, Ui.P(6))) {
+            using (var b = new SolidBrush(Theme.Field)) g.FillPath(b, path);
+            using (var p = new Pen(Color.FromArgb(30, 255, 255, 255), 1)) g.DrawPath(p, path);
+        }
+        if (Box.Focused)
+            using (var p = new Pen(Ui.Accent, Math.Max(1.5f, 2 * Ui.S)))
+                g.DrawLine(p, Ui.P(6), Height - 1.5f * Ui.S, Width - Ui.P(6), Height - 1.5f * Ui.S);
+    }
+}
+
+// A settings card: rounded block with rows separated by thin lines.
+class Card : Panel {
+    public readonly List<int> Lines = new List<int>();
+
+    public Card() {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Theme.Card;
+    }
+
+    protected override void OnPaint(PaintEventArgs e) {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.Clear(Theme.Window);
+        var r = new RectangleF(0.5f, 0.5f, Width - 1, Height - 1);
+        using (var path = Ui.RoundRect(r, Ui.P(8))) {
+            using (var b = new SolidBrush(Theme.Card)) g.FillPath(b, path);
+            using (var p = new Pen(Color.FromArgb(22, 255, 255, 255), 1)) g.DrawPath(p, path);
+        }
+        using (var p = new Pen(Theme.CardLine, 1))
+            foreach (int y in Lines) g.DrawLine(p, Ui.P(16), y, Width - Ui.P(16), y);
+    }
+}
+
+// ---------------------------------------------------------------- Settings window
+
 class SettingsForm : Form {
     static readonly string[] PosKeys = { "abajo", "arriba", "arriba-der" };
-    static readonly string[] PosNames = { L.T("Abajo al centro", "Bottom center"), L.T("Arriba al centro", "Top center"), L.T("Arriba a la derecha", "Top right") };
-    static readonly Color Bg = Color.FromArgb(32, 32, 34), Field = Color.FromArgb(48, 48, 52);
 
     readonly Config cfg;
-    readonly NumericUpDown secs = new NumericUpDown(), step = new NumericUpDown();
-    readonly ComboBox pos = new ComboBox();
+    readonly Segmented design = new Segmented("Windows 11", "Liquid Glass");
+    readonly Segmented pos = new Segmented(L.T("Abajo", "Bottom"), L.T("Arriba", "Top"), L.T("Arriba der.", "Top right"));
     readonly Swatches colors = new Swatches();
-    readonly CheckBox startup = new CheckBox(), showScreen = new CheckBox(), showSleep = new CheckBox(), showPlan = new CheckBox();
+    readonly MiniSlider secs = new MiniSlider(), step = new MiniSlider(), hdrLevel = new MiniSlider();
+    readonly ToggleSwitch startup = new ToggleSwitch(), showScreen = new ToggleSwitch(), showSleep = new ToggleSwitch(), showPlan = new ToggleSwitch();
+    readonly ToggleSwitch hdrOn = new ToggleSwitch(), hdrBar = new ToggleSwitch(), hdrButtons = new ToggleSwitch(), hdrEdge = new ToggleSwitch(),
+        hdrLight = new ToggleSwitch(), hdrPanel = new ToggleSwitch(), hdrOsd = new ToggleSwitch();
     readonly HotkeyBox keyUp = new HotkeyBox(), keyDown = new HotkeyBox();
     readonly TextBox ip = new TextBox();
-    readonly Button find = new Button(), save = new Button(), cancel = new Button(), adjust = new Button();
-    readonly ComboBox design = new ComboBox();
-    readonly CheckBox hdrOn = new CheckBox();
-    readonly MiniSlider hdrLevel = new MiniSlider();
-    int y;
-    public event Action AdjustGlass;
+    readonly ModernButton find = new ModernButton(L.T("Buscar", "Find"), false), glassBtn = new ModernButton(L.T("Abrir", "Open"), false);
+    readonly ModernButton save = new ModernButton(L.T("Guardar", "Save"), true), cancel = new ModernButton(L.T("Cancelar", "Cancel"), false);
+    readonly Font fHead = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 10.5f, FontStyle.Regular);
+    readonly Font fRow = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
+    readonly Font fSub = Ui.F("Segoe UI Variable Small", "Segoe UI", 8.5f, FontStyle.Regular);
+    readonly int[] colY = new int[2];
+    readonly int colW;
+    readonly List<Control> hdrDetails = new List<Control>();
+    Card card;
+    int cardCol;
 
     public bool Startup { get { return startup.Checked; } }
     public event Action<bool> Saved; // true if the IP changed
+    public event Action AdjustGlass;
 
     public SettingsForm(Config cfg, bool isStartup) {
         this.cfg = cfg;
@@ -2329,116 +2663,90 @@ class SettingsForm : Form {
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.None;
-        BackColor = Bg;
-        ForeColor = Ui.Text;
-        Font = Ui.F("Segoe UI Variable Text", "Segoe UI", 10f, FontStyle.Regular);
-        ClientSize = new Size(Ui.P(460), Ui.P(392));
+        BackColor = Theme.Window;
+        ForeColor = Theme.Text;
+        Font = fRow;
+        KeyPreview = true;
         try { Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { }
+        ClientSize = new Size(Ui.P(900), Ui.P(700));
+        colW = (ClientSize.Width - Ui.P(24) * 3) / 2;
 
-        y = Ui.P(18);
-        design.DropDownStyle = ComboBoxStyle.DropDownList;
-        design.FlatStyle = FlatStyle.Flat;
-        design.Items.AddRange(new object[] { "Windows 11", "Liquid Glass" });
-        design.SelectedIndex = cfg.Design == "glass" ? 1 : 0;
-        var designBox = new Panel { BackColor = Bg, Size = new Size(Ui.P(216), Ui.P(30)) };
-        design.SetBounds(0, Ui.P(2), Ui.P(130), Ui.P(26));
-        adjust.SetBounds(Ui.P(138), 0, Ui.P(78), Ui.P(30));
-        adjust.Text = L.T("Ajustar…", "Adjust…");
-        Flat(adjust, Field);
-        adjust.Click += delegate { if (AdjustGlass != null) AdjustGlass(); };
-        designBox.Controls.Add(design);
-        designBox.Controls.Add(adjust);
-        AddRow(L.T("Diseño", "Design"), designBox, Ui.P(216));
+        var title = new Label { Text = L.T("Configuración", "Settings"), AutoSize = true, ForeColor = Theme.Text, BackColor = Theme.Window,
+            Font = Ui.F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 18f, FontStyle.Regular), Location = new Point(Ui.P(22), Ui.P(14)) };
+        Controls.Add(title);
+        colY[0] = colY[1] = Ui.P(70);
 
-        // Real HDR peaks in the bars, lit buttons and the edge of the glass
-        var hdrBox = new Panel { BackColor = Bg, Size = new Size(Ui.P(216), Ui.P(30)) };
-        hdrOn.Text = "HDR";
-        hdrOn.AutoSize = true;
-        hdrOn.Checked = cfg.HdrPeak;
-        hdrOn.Location = new Point(0, (Ui.P(30) - hdrOn.PreferredSize.Height) / 2);
-        hdrLevel.BackColor = Bg;
+        // ---- Left column
+        Begin(0, L.T("Apariencia", "Appearance"));
+        design.Selected = cfg.Design == "glass" ? 1 : 0;
+        Row(L.T("Diseño", "Design"), null, design, Ui.P(240));
+        glassBtn.Click += delegate { if (AdjustGlass != null) AdjustGlass(); };
+        Row(L.T("Ajustes del vidrio", "Glass settings"), L.T("Desenfoque, reflejos, borde RGB y luz", "Blur, reflections, RGB edge and light"), glassBtn, Ui.P(110));
+        colors.Value = cfg.Color;
+        Row(L.T("Color de la barra", "Bar color"), L.T("En el diseño Windows 11", "In the Windows 11 design"), colors, Ui.P(220));
+        End();
+
+        Begin(0, "HDR");
+        hdrOn.SetChecked(cfg.HdrPeak);
+        Row(L.T("Efectos HDR", "HDR effects"), L.T("Más brillo que el blanco normal, con el HDR de Windows", "Brighter than normal white, with Windows HDR"), hdrOn, hdrOn.Width);
         hdrLevel.Value = (float)cfg.HdrStrength;
-        hdrLevel.SetBounds(Ui.P(64), (Ui.P(30) - hdrLevel.Height) / 2, Ui.P(152), hdrLevel.Height);
-        hdrLevel.Enabled = cfg.HdrPeak;
-        hdrOn.CheckedChanged += delegate { hdrLevel.Enabled = hdrOn.Checked; };
-        hdrBox.Controls.Add(hdrOn);
-        hdrBox.Controls.Add(hdrLevel);
-        AddRow(L.T("Brillo HDR en barras y botones", "HDR peak on bars and buttons"), hdrBox, Ui.P(216));
+        var hdrVal = Value(hdrLevel, v => Math.Round(v * 100) + "%");
+        Row(L.T("Intensidad", "Intensity"), null, hdrLevel, Ui.P(200), hdrVal);
+        Toggle(hdrBar, L.T("Barra de brillo", "Brightness bar"), cfg.HdrBar, true);
+        Toggle(hdrButtons, L.T("Botones encendidos", "Buttons that are on"), cfg.HdrButtons, true);
+        Toggle(hdrEdge, L.T("Reflejo del borde (vidrio)", "Edge reflection (glass)"), cfg.HdrEdge, true);
+        Toggle(hdrLight, L.T("Luz del mouse (vidrio)", "Mouse light (glass)"), cfg.HdrLight, true);
+        Toggle(hdrPanel, L.T("En el panel", "In the panel"), cfg.HdrInPanel, true);
+        Toggle(hdrOsd, L.T("En el cartel de los atajos", "In the shortcut bar"), cfg.HdrInOsd, true);
+        hdrDetails.Add(hdrLevel);
+        hdrOn.CheckedChanged += delegate { foreach (var c in hdrDetails) c.Enabled = hdrOn.Checked; };
+        foreach (var c in hdrDetails) c.Enabled = hdrOn.Checked;
+        End();
 
-        secs.DecimalPlaces = 1; secs.Increment = 0.5M; secs.Minimum = 0.5M; secs.Maximum = 10;
-        secs.Value = (decimal)Math.Max(0.5, Math.Min(10, cfg.OsdSegundos));
-        AddRow(L.T("Duración del cartel (segundos)", "On-screen bar duration (s)"), secs, Ui.P(90));
+        // ---- Right column
+        Begin(1, L.T("Cartel de los atajos", "Shortcut bar"));
+        secs.Value = (float)((Math.Max(0.5, Math.Min(10, cfg.OsdSegundos)) - 0.5) / 9.5);
+        Row(L.T("Duración", "Duration"), null, secs, Ui.P(170), Value(secs, v => SecsOf(v).ToString("0.0") + " s"));
+        pos.Selected = Math.Max(0, Array.IndexOf(PosKeys, cfg.OsdPos));
+        Row(L.T("Posición", "Position"), null, pos, Ui.P(250));
+        End();
 
-        pos.DropDownStyle = ComboBoxStyle.DropDownList;
-        pos.FlatStyle = FlatStyle.Flat;
-        pos.Items.AddRange(PosNames);
-        pos.SelectedIndex = Math.Max(0, Array.IndexOf(PosKeys, cfg.OsdPos));
-        AddRow(L.T("Posición del cartel", "On-screen bar position"), pos, Ui.P(190));
-
-        step.Minimum = 1; step.Maximum = 20; step.Value = Math.Max(1, Math.Min(20, cfg.Paso));
+        Begin(1, L.T("Atajos de teclado", "Keyboard shortcuts"));
         keyUp.Set(cfg.UpMods, (Keys)cfg.UpKey);
         keyDown.Set(cfg.DownMods, (Keys)cfg.DownKey);
-        AddRow(L.T("Atajo para subir el brillo", "Brightness up shortcut"), keyUp, Ui.P(190));
-        AddRow(L.T("Atajo para bajar el brillo", "Brightness down shortcut"), keyDown, Ui.P(190));
-        AddRow(L.T("Paso de los atajos", "Shortcut step"), step, Ui.P(90));
+        Row(L.T("Subir el brillo", "Brightness up"), null, new FieldBox(keyUp, Ui.P(180)), Ui.P(180));
+        Row(L.T("Bajar el brillo", "Brightness down"), null, new FieldBox(keyDown, Ui.P(180)), Ui.P(180));
+        step.Value = (Math.Max(1, Math.Min(20, cfg.Paso)) - 1) / 19f;
+        Row(L.T("Paso", "Step"), null, step, Ui.P(170), Value(step, v => StepOf(v).ToString()));
+        End();
 
-        colors.Value = cfg.Color;
-        colors.BackColor = Bg;
-        AddRow(L.T("Color de la barra", "Bar color"), colors, Ui.P(216));
+        Begin(1, L.T("Mostrar en el panel", "Show in the panel"));
+        Toggle(showScreen, L.T("Apagar pantalla", "Turn off display"), !cfg.HideScreenOff, false);
+        Toggle(showSleep, L.T("Suspender PC", "Sleep PC"), !cfg.HideSleep, false);
+        Toggle(showPlan, L.T("Editar plan de energía", "Edit power plan"), !cfg.HidePlan, false);
+        End();
 
+        Begin(1, L.T("Monitor y sistema", "Monitor and system"));
         ip.Text = cfg.Ip;
-        var ipBox = new Panel { BackColor = Bg, Size = new Size(Ui.P(216), Ui.P(30)) };
-        ip.SetBounds(0, Ui.P(2), Ui.P(130), Ui.P(26));
-        find.SetBounds(Ui.P(138), 0, Ui.P(78), Ui.P(30));
-        find.Text = L.T("Buscar", "Find");
-        Flat(find, Field);
-        ipBox.Controls.Add(ip);
+        var ipBox = new Panel { BackColor = Theme.Card, Size = new Size(Ui.P(250), Ui.P(32)) };
+        var ipField = new FieldBox(ip, Ui.P(160));
+        ipField.Location = Point.Empty;
+        find.SetBounds(Ui.P(168), 0, Ui.P(82), Ui.P(32));
+        find.BackColor = Theme.Card;
+        ipBox.Controls.Add(ipField);
         ipBox.Controls.Add(find);
-        AddRow(L.T("IP del monitor", "Monitor IP"), ipBox, Ui.P(216));
+        Row(L.T("IP del monitor", "Monitor IP"), null, ipBox, Ui.P(250));
+        startup.SetChecked(isStartup);
+        Row(L.T("Iniciar con Windows", "Start with Windows"), null, startup, startup.Width);
+        End();
 
-        var head = new Label { Text = L.T("Mostrar en el panel", "Show in the panel"), AutoSize = true, ForeColor = Ui.Text2 };
-        head.Location = new Point(Ui.P(22), y - Ui.P(4));
-        Controls.Add(head);
-        y += Ui.P(22);
-        int cx = Ui.P(22);
-        foreach (var t in new[] {
-            Tuple.Create(showScreen, L.T("Apagar pantalla", "Turn off display"), !cfg.HideScreenOff),
-            Tuple.Create(showSleep, L.T("Suspender PC", "Sleep PC"), !cfg.HideSleep),
-            Tuple.Create(showPlan, L.T("Plan de energía", "Power plan"), !cfg.HidePlan) }) {
-            t.Item1.Text = t.Item2;
-            t.Item1.Checked = t.Item3;
-            t.Item1.AutoSize = true;
-            t.Item1.Location = new Point(cx, y);
-            Controls.Add(t.Item1);
-            cx += t.Item1.PreferredSize.Width + Ui.P(14);
-        }
-        y += Ui.P(40);
-
-        startup.Text = L.T("Iniciar con Windows", "Start with Windows");
-        startup.Checked = isStartup;
-        startup.AutoSize = true;
-        startup.Location = new Point(Ui.P(22), y + Ui.P(6));
-        Controls.Add(startup);
-        ClientSize = new Size(ClientSize.Width, y + Ui.P(100));
-
-        save.Text = L.T("Guardar", "Save");
-        cancel.Text = L.T("Cancelar", "Cancel");
-        cancel.SetBounds(ClientSize.Width - Ui.P(22) - Ui.P(100), ClientSize.Height - Ui.P(54), Ui.P(100), Ui.P(34));
-        save.SetBounds(cancel.Left - Ui.P(10) - Ui.P(100), cancel.Top, Ui.P(100), Ui.P(34));
-        Flat(save, Ui.Accent);
-        if (Ui.Accent.GetBrightness() > 0.6f) save.ForeColor = Color.Black;
-        Flat(cancel, Field);
+        int bottom = Math.Max(colY[0], colY[1]) + Ui.P(8);
+        ClientSize = new Size(ClientSize.Width, bottom + Ui.P(60));
+        cancel.SetBounds(ClientSize.Width - Ui.P(24) - Ui.P(110), ClientSize.Height - Ui.P(48), Ui.P(110), Ui.P(32));
+        save.SetBounds(cancel.Left - Ui.P(10) - Ui.P(110), cancel.Top, Ui.P(110), Ui.P(32));
+        cancel.BackColor = save.BackColor = Theme.Window;
         Controls.Add(save);
         Controls.Add(cancel);
-        AcceptButton = save;
-        CancelButton = cancel;
-
-        foreach (Control c in new Control[] { secs, step, pos, ip, keyUp, keyDown, design }) { c.BackColor = Field; c.ForeColor = Ui.Text; }
-        ip.BorderStyle = BorderStyle.FixedSingle;
-        keyUp.BorderStyle = BorderStyle.FixedSingle;
-        keyDown.BorderStyle = BorderStyle.FixedSingle;
-        secs.BorderStyle = BorderStyle.FixedSingle;
-        step.BorderStyle = BorderStyle.FixedSingle;
 
         find.Click += async delegate {
             find.Enabled = false;
@@ -2449,57 +2757,104 @@ class SettingsForm : Form {
             find.Enabled = true;
         };
         cancel.Click += delegate { Close(); };
-        save.Click += delegate {
-            if (keyUp.Mods == keyDown.Mods && keyUp.Key == keyDown.Key) {
-                MessageBox.Show(this, L.T("Los dos atajos no pueden ser iguales.", "The two shortcuts can't be the same."), "LGBrillo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            string newIp = ip.Text.Trim();
-            bool ipChanged = newIp != cfg.Ip;
-            cfg.OsdSegundos = (double)secs.Value;
-            cfg.OsdPos = PosKeys[Math.Max(0, pos.SelectedIndex)];
-            cfg.Paso = (int)step.Value;
-            cfg.Color = colors.Value;
-            cfg.Ip = newIp;
-            cfg.UpMods = keyUp.Mods; cfg.UpKey = (int)keyUp.Key;
-            cfg.DownMods = keyDown.Mods; cfg.DownKey = (int)keyDown.Key;
-            cfg.HideScreenOff = !showScreen.Checked;
-            cfg.HideSleep = !showSleep.Checked;
-            cfg.HidePlan = !showPlan.Checked;
-            cfg.Design = design.SelectedIndex == 1 ? "glass" : "win11";
-            cfg.HdrPeak = hdrOn.Checked;
-            cfg.HdrStrength = hdrLevel.Value;
-            cfg.Save();
-            if (Saved != null) Saved(ipChanged);
-            Close();
-        };
+        save.Click += delegate { SaveAndClose(); };
     }
 
-    void AddRow(string label, Control c, int width) {
-        int h = Ui.P(30);
-        var l = new Label { Text = label, AutoSize = false, ForeColor = Ui.Text, TextAlign = ContentAlignment.MiddleLeft };
-        l.SetBounds(Ui.P(22), y, Ui.P(200), h);
-        Controls.Add(l);
+    static double SecsOf(float v) { return 0.5 + Math.Round(v * 19) * 0.5; }
+    static int StepOf(float v) { return 1 + (int)Math.Round(v * 19); }
+
+    protected override bool ProcessCmdKey(ref Message msg, Keys k) {
+        if (k == Keys.Escape && !(ActiveControl is HotkeyBox)) { Close(); return true; }
+        return base.ProcessCmdKey(ref msg, k);
+    }
+
+    void SaveAndClose() {
+        if (keyUp.Mods == keyDown.Mods && keyUp.Key == keyDown.Key) {
+            MessageBox.Show(this, L.T("Los dos atajos no pueden ser iguales.", "The two shortcuts can't be the same."), "LGBrillo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        string newIp = ip.Text.Trim();
+        bool ipChanged = newIp != cfg.Ip;
+        cfg.Design = design.Selected == 1 ? "glass" : "win11";
+        cfg.Color = colors.Value;
+        cfg.HdrPeak = hdrOn.Checked;
+        cfg.HdrStrength = hdrLevel.Value;
+        cfg.HdrBar = hdrBar.Checked; cfg.HdrButtons = hdrButtons.Checked; cfg.HdrEdge = hdrEdge.Checked; cfg.HdrLight = hdrLight.Checked;
+        cfg.HdrInPanel = hdrPanel.Checked; cfg.HdrInOsd = hdrOsd.Checked;
+        cfg.OsdSegundos = SecsOf(secs.Value);
+        cfg.OsdPos = PosKeys[pos.Selected];
+        cfg.UpMods = keyUp.Mods; cfg.UpKey = (int)keyUp.Key;
+        cfg.DownMods = keyDown.Mods; cfg.DownKey = (int)keyDown.Key;
+        cfg.Paso = StepOf(step.Value);
+        cfg.HideScreenOff = !showScreen.Checked;
+        cfg.HideSleep = !showSleep.Checked;
+        cfg.HidePlan = !showPlan.Checked;
+        cfg.Ip = newIp;
+        cfg.Save();
+        if (Saved != null) Saved(ipChanged);
+        Close();
+    }
+
+    // ---- Layout helpers: a header and a card per section, rows inside the card.
+
+    void Begin(int col, string header) {
+        cardCol = col;
+        int x = Ui.P(24) + col * (colW + Ui.P(24));
+        var h = new Label { Text = header, AutoSize = true, ForeColor = Theme.Text, BackColor = Theme.Window, Font = fHead, Location = new Point(x + Ui.P(2), colY[col]) };
+        Controls.Add(h);
+        colY[col] += Ui.P(28);
+        card = new Card { Location = new Point(x, colY[col]), Size = new Size(colW, 0) };
+        Controls.Add(card);
+    }
+
+    void End() {
+        colY[cardCol] = card.Bottom + Ui.P(18);
+        card.Invalidate();
+    }
+
+    Label Value(MiniSlider s, Func<float, string> fmt) {
+        var l = new Label { AutoSize = false, ForeColor = Theme.Text2, BackColor = Theme.Card, TextAlign = ContentAlignment.MiddleRight, Font = fSub, Text = fmt(s.Value) };
+        s.ValueChanged += delegate { l.Text = fmt(s.Value); };
+        return l;
+    }
+
+    void Toggle(ToggleSwitch t, string label, bool value, bool hdrDetail) {
+        t.SetChecked(value);
+        Row(label, null, t, t.Width);
+        if (hdrDetail) hdrDetails.Add(t);
+    }
+
+    void Row(string label, string subtitle, Control c, int width, Label value = null) {
+        int h = Ui.P(subtitle != null ? 58 : 48);
+        int y = card.Height;
+        if (y > 0) card.Lines.Add(y);
+        var l = new Label { Text = label, AutoSize = false, ForeColor = Theme.Text, BackColor = Theme.Card, TextAlign = ContentAlignment.MiddleLeft, Font = fRow };
+        int textW = card.Width - width - Ui.P(40) - (value != null ? Ui.P(48) : 0);
+        if (subtitle != null) {
+            l.SetBounds(Ui.P(16), y + Ui.P(9), textW, Ui.P(22));
+            var s = new Label { Text = subtitle, AutoSize = false, ForeColor = Theme.Text2, BackColor = Theme.Card, Font = fSub, AutoEllipsis = true };
+            s.SetBounds(Ui.P(16), y + Ui.P(31), textW, Ui.P(18));
+            card.Controls.Add(s);
+        } else l.SetBounds(Ui.P(16), y, textW, h);
+        card.Controls.Add(l);
+        c.BackColor = Theme.Card;
+        int right = card.Width - Ui.P(16);
+        if (value != null) {
+            value.SetBounds(right - Ui.P(48), y, Ui.P(48), h);
+            card.Controls.Add(value);
+            right -= Ui.P(52);
+        }
         c.Width = width;
-        if (c is Swatches || c is Panel) c.Height = h;
-        c.Location = new Point(ClientSize.Width - Ui.P(22) - width, y + (h - c.Height) / 2);
-        Controls.Add(c);
-        y += h + Ui.P(18);
-    }
-
-    static void Flat(Button b, Color bg) {
-        b.FlatStyle = FlatStyle.Flat;
-        b.FlatAppearance.BorderColor = Color.FromArgb(70, 70, 76);
-        b.FlatAppearance.BorderSize = 1;
-        b.BackColor = bg;
-        b.ForeColor = Ui.Text;
-        b.Cursor = Cursors.Hand;
+        if (c is Swatches) c.Height = Ui.P(30);
+        c.Location = new Point(right - width, y + (h - c.Height) / 2);
+        card.Controls.Add(c);
+        card.Height = y + h;
     }
 
     protected override void OnHandleCreated(EventArgs e) {
         base.OnHandleCreated(e);
         Ui.DarkTitle(this);
-        Ui.Backdrop(this, 2, false); // Mica on the title bar
+        Ui.Backdrop(this, 2, false);
     }
 }
 
@@ -3109,6 +3464,8 @@ class App : ApplicationContext {
         popup.SliderMoved += v => Want(v, false);
         osd.SliderMoved += v => Want(v, false);
         popup.ButtonClicked += OnButton;
+        popup.ChoiceClicked += OnChoice;
+        popup.HdrClicked += delegate { SetHdrEffects(!cfg.HdrPeak); };
 
         tv.BacklightChanged += OnBacklight;
         tv.Disconnected += delegate { Log.Write("connection lost"); lostAt = DateTime.UtcNow; SetStatus(L.T("Sin conexión, reintentando…", "Disconnected, retrying…"), false); };
@@ -3156,6 +3513,8 @@ class App : ApplicationContext {
     void ApplyConfig() {
         GlassCfg.From(cfg);
         HdrPeak.On = cfg.HdrPeak;
+        HdrPeak.Bar = cfg.HdrBar; HdrPeak.Buttons = cfg.HdrButtons; HdrPeak.Edge = cfg.HdrEdge; HdrPeak.Light = cfg.HdrLight;
+        HdrPeak.InPanel = cfg.HdrInPanel; HdrPeak.InOsd = cfg.HdrInOsd;
         HdrPeak.Strength = (float)cfg.HdrStrength;
         if (designShown != null && designShown != cfg.Design) { popup.ResetDesign(); osd.ResetDesign(); }
         else { popup.GlassChanged(); osd.GlassChanged(); }
@@ -3189,6 +3548,9 @@ class App : ApplicationContext {
         foreach (ToolStripItem it in design.DropDownItems) it.ForeColor = Ui.Text;
         ((ToolStripDropDownMenu)design.DropDown).Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors());
         m.Items.Add(design);
+        var hdrItem = new ToolStripMenuItem(L.T("Efectos HDR", "HDR effects"));
+        hdrItem.Click += delegate { SetHdrEffects(!cfg.HdrPeak); };
+        m.Items.Add(hdrItem);
         m.Items.Add(new ToolStripSeparator());
         var start = new ToolStripMenuItem(L.T("Iniciar con Windows", "Start with Windows"));
         start.Click += delegate { SetStartup(!IsStartup()); };
@@ -3204,7 +3566,12 @@ class App : ApplicationContext {
         });
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add(L.T("Salir", "Quit"), null, delegate { Quit(); });
-        m.Opening += delegate { start.Checked = IsStartup(); win11.Checked = cfg.Design != "glass"; liquid.Checked = cfg.Design == "glass"; };
+        m.Opening += delegate {
+            start.Checked = IsStartup(); win11.Checked = cfg.Design != "glass"; liquid.Checked = cfg.Design == "glass";
+            hdrItem.Checked = cfg.HdrPeak;
+            hdrItem.Enabled = HdrPeak.WindowsHdr;
+            hdrItem.ToolTipText = HdrPeak.WindowsHdr ? null : L.T("Activá el HDR de Windows para usarlos", "Turn on Windows HDR to use them");
+        };
         foreach (ToolStripItem it in m.Items) it.ForeColor = Ui.Text;
         return m;
     }
@@ -3372,57 +3739,66 @@ class App : ApplicationContext {
 
     async void RefreshInput() { if (tv.Connected) await LoadInputs(); }
 
-    async void ShowInputMenu() {
+    // Expands the list of inputs inside the panel.
+    async void ExpandInputs() {
         if (!await EnsureConnected()) return;
         if (!await LoadInputs()) { SetStatus(L.T("No pude leer las entradas del monitor", "Could not read the monitor's inputs"), false); return; }
-        var m = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors()), ShowCheckMargin = true, ShowImageMargin = false };
-        foreach (var inp in inputs) {
-            var it = new ToolStripMenuItem(inp.Connected ? inp.Name : inp.Name + L.T("  ·  sin señal", "  ·  no signal")) {
-                Checked = inp.AppId == currentApp, ForeColor = inp.Connected ? Ui.Text : Ui.Text2
-            };
-            string id = inp.Id;
-            it.Click += async delegate {
-                try { await tv.SwitchInput(id); }
-                catch (Exception ex) { SetStatus(L.T("No se pudo cambiar la entrada: ", "Could not switch input: ") + ex.Message, false); return; }
-                await Task.Delay(1200);
-                RefreshInput();
-            };
-            m.Items.Add(it);
+        var list = new List<Popup.Choice>();
+        foreach (var inp in inputs)
+            list.Add(new Popup.Choice { Text = inp.Connected ? inp.Name : inp.Name + L.T(" · sin señal", " · no signal"), Selected = inp.AppId == currentApp, Dim = !inp.Connected });
+        popup.Expand(Popup.ExpandInput, list);
+    }
+
+    List<int> timeValues = new List<int>();
+
+    // Expands the Windows inactivity times inside the panel ("Never" first), with the current one marked.
+    void ExpandTimes(int row) {
+        int current = row == Popup.RowScreen ? Power.Get(Power.SubVideo, Power.VideoIdle) : Power.Get(Power.SubSleep, Power.StandbyIdle);
+        timeValues = new List<int>(Power.Times);
+        if (current > 0 && !timeValues.Contains(current)) { timeValues.Add(current); timeValues.Sort(); timeValues.Remove(0); timeValues.Insert(0, 0); }
+        var list = new List<Popup.Choice>();
+        foreach (int s in timeValues) list.Add(new Popup.Choice { Text = Power.Name(s), Selected = s == current });
+        popup.Expand(row, list);
+    }
+
+    // An option of an expanded list was chosen.
+    async void OnChoice(int which, int index) {
+        if (which == Popup.ExpandInput) {
+            if (index < 0 || index >= inputs.Count) return;
+            string id = inputs[index].Id;
+            popup.Collapse();
+            try { await tv.SwitchInput(id); }
+            catch (Exception ex) { SetStatus(L.T("No se pudo cambiar la entrada: ", "Could not switch input: ") + ex.Message, false); return; }
+            await Task.Delay(1200);
+            RefreshInput();
+            return;
         }
-        m.Closed += delegate { m.BeginInvoke((Action)m.Dispose); };
-        popup.ShowMenu(2, m);
+        if (index < 0 || index >= timeValues.Count) return;
+        bool ok = which == Popup.RowScreen ? Power.Set(Power.SubVideo, Power.VideoIdle, timeValues[index]) : Power.Set(Power.SubSleep, Power.StandbyIdle, timeValues[index]);
+        if (!ok) tray.ShowBalloonTip(5000, "LGBrillo", L.T("Windows no dejó cambiar ese tiempo.", "Windows did not allow changing that time."), ToolTipIcon.Warning);
+        RefreshTimes();
+        popup.Collapse();
+    }
+
+    void SetHdrEffects(bool on) {
+        cfg.HdrPeak = on;
+        cfg.Save();
+        Log.Write(on ? "hdr effects on" : "hdr effects off");
+        ApplyConfig();
+        popup.Invalidate();
     }
 
     void RefreshTimes() {
         popup.SetTimes(Power.Name(Power.Get(Power.SubVideo, Power.VideoIdle)), Power.Name(Power.Get(Power.SubSleep, Power.StandbyIdle)));
     }
 
-    // Menu with the Windows inactivity timeouts; checks the current one (and adds it if it isn't listed).
-    void ShowTimeMenu(int row, Guid sub, Guid setting) {
-        int current = Power.Get(sub, setting);
-        var times = new List<int>(Power.Times);
-        if (current > 0 && !times.Contains(current)) { times.Add(current); times.Sort(); }
-        var m = new ContextMenuStrip { Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors()), ShowCheckMargin = true, ShowImageMargin = false };
-        foreach (int s in times) {
-            var it = new ToolStripMenuItem(Power.Name(s)) { Checked = s == current, ForeColor = Ui.Text };
-            int v = s;
-            it.Click += delegate {
-                if (!Power.Set(sub, setting, v))
-                    tray.ShowBalloonTip(5000, "LGBrillo", L.T("Windows no dejó cambiar ese tiempo.", "Windows did not allow changing that time."), ToolTipIcon.Warning);
-                RefreshTimes();
-            };
-            m.Items.Add(it);
-            if (s == 0) m.Items.Add(new ToolStripSeparator());
-        }
-        m.Closed += delegate { m.BeginInvoke((Action)m.Dispose); };
-        popup.ShowMenu(row, m);
-    }
-
     // 0 = Eye Care, 1 = Pixel Refresh (both on the monitor), 2 = video input; Windows power rows.
     async void OnButton(int i) {
-        if (i == 2) { ShowInputMenu(); return; }
-        if (i == Popup.RowScreen) { ShowTimeMenu(i, Power.SubVideo, Power.VideoIdle); return; }
-        if (i == Popup.RowSleep) { ShowTimeMenu(i, Power.SubSleep, Power.StandbyIdle); return; }
+        if (i == 2 || i == Popup.RowScreen || i == Popup.RowSleep) {
+            if (popup.Expanded == i) { popup.Collapse(); return; }
+            if (i == 2) ExpandInputs(); else ExpandTimes(i);
+            return;
+        }
         if (i == Popup.RowPlan) { popup.Hide(); Power.OpenPlanSettings(); return; }
         bool want = !popup.IsOn(i);
         popup.SetButton(i, want);
