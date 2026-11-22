@@ -306,7 +306,9 @@ class Tv {
         finally { sendLock.Release(); }
     }
 
-    async Task<Dictionary<string, object>> Request(string uri, object payload, int timeoutMs = 5000) {
+    // drop: a request that never answers usually means a dead socket, so it is closed to reconnect. Not for the alert
+    // trick, which newer firmware just leaves unanswered while the connection is fine.
+    async Task<Dictionary<string, object>> Request(string uri, object payload, int timeoutMs = 5000, bool drop = true) {
         string id = "r" + (++nextId);
         var tcs = new TaskCompletionSource<Dictionary<string, object>>();
         pend[id] = tcs;
@@ -314,7 +316,7 @@ class Tv {
         catch { pend.Remove(id); Drop(); throw; }
         if (await Task.WhenAny(tcs.Task, Task.Delay(timeoutMs)) != tcs.Task) {
             pend.Remove(id);
-            Drop();
+            if (drop) Drop();
             throw new TimeoutException(L.T("el monitor no respondió", "the monitor did not respond"));
         }
         return await tcs.Task;
@@ -378,7 +380,6 @@ class Tv {
         return Request("ssap://tv/switchInput", new Dictionary<string, object> { { "inputId", id } });
     }
 
-    // setSystemSettings isn't open over SSAP: luna is called through an alert that closes instantly.
     public Task SetBacklight(int v) { return SetSetting("picture", "backlight", v); }
 
     // Eye Care (low blue light). It can't be read over SSAP, only written.
@@ -387,16 +388,32 @@ class Tv {
     // Pixel Refresh (OLED pixel cleaning) the next time it turns off. It can't be read either.
     public Task SetPixelRefresh(bool on) { return SetSetting("picture", "scheduledPixelCleaning", on ? "on" : "off"); }
 
+    bool lunaBlocked; // the alert trick got no answer once: this firmware closed it
+
+    // First the official setSystemSettings (the monitor accepts it for brightness, in a few ms and without any alert).
+    // Keys it refuses go through luna with the alert trick, which older firmware answers at once.
     async Task SetSetting(string category, string key, object value) {
         var prm = new Dictionary<string, object> {
             { "category", category }, { "settings", new Dictionary<string, object> { { key, value } } }
         };
+        Exception official;
+        try { await Request("ssap://settings/setSystemSettings", prm, 4000); return; }
+        catch (Exception ex) { official = ex; }
+        if (!Connected) throw official;
+        if (lunaBlocked) throw new NotSupportedException(L.T("el monitor no permite cambiar esto por red", "the monitor doesn't allow changing this over the network"));
         var act = new Dictionary<string, object> { { "uri", LunaSet }, { "params", prm } };
-        var r = await Request("ssap://system.notifications/createAlert", new Dictionary<string, object> {
-            { "message", " " },
-            { "buttons", new object[] { new Dictionary<string, object> { { "label", "" }, { "onClick", LunaSet }, { "params", prm } } } },
-            { "onclose", act }, { "onfail", act }
-        });
+        Dictionary<string, object> r;
+        try {
+            r = await Request("ssap://system.notifications/createAlert", new Dictionary<string, object> {
+                { "message", " " },
+                { "buttons", new object[] { new Dictionary<string, object> { { "label", "" }, { "onClick", LunaSet }, { "params", prm } } } },
+                { "onclose", act }, { "onfail", act }
+            }, 3000, false);
+        } catch (TimeoutException) {
+            lunaBlocked = true;
+            Log.Write("luna alert trick unanswered: " + key + " can't be set on this firmware");
+            throw new NotSupportedException(L.T("el monitor no permite cambiar esto por red", "the monitor doesn't allow changing this over the network"));
+        }
         object aid;
         if (r.TryGetValue("alertId", out aid))
             await Request("ssap://system.notifications/closeAlert", new Dictionary<string, object> { { "alertId", aid } });
@@ -888,7 +905,7 @@ class HdrOverlay : Form {
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None;
-        TopMost = true;
+        // No TopMost here: WinForms applies it with a SetWindowPos that activates the window. WS_EX_TOPMOST below does it quietly.
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -896,18 +913,42 @@ class HdrOverlay : Form {
         get {
             var cp = base.CreateParams;
             cp.ExStyle |= 0x00200000 | 0x80 | 0x08000000 | 0x20 | 0x8; // NOREDIRECTIONBITMAP | TOOLWINDOW | NOACTIVATE | TRANSPARENT | TOPMOST
+            cp.Style |= 0x08000000; // WS_DISABLED: it can never take the focus away from the panel
             return cp;
         }
     }
 
-    // Mouse goes to the panel underneath.
+    Form panel;
+
+    // Mouse goes to the panel underneath, and the activation too if Windows ever hands it to this layer.
     protected override void WndProc(ref Message m) {
-        if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; } // WM_NCHITTEST -> HTTRANSPARENT
+        if (m.Msg == 0x84) { m.Result = new IntPtr(-1); return; }      // WM_NCHITTEST -> HTTRANSPARENT
+        if (m.Msg == 0x21) { m.Result = new IntPtr(3); return; }       // WM_MOUSEACTIVATE -> MA_NOACTIVATE
+        if (m.Msg == 0x06 && (m.WParam.ToInt64() & 0xFFFF) != 0 && panel != null && !panel.IsDisposed && panel.Visible) {
+            var p = panel;                                              // WM_ACTIVATE: give it back
+            BeginInvoke((Action)delegate { if (p.Visible) p.Activate(); });
+        }
         base.WndProc(ref m);
     }
 
     protected override void OnPaintBackground(PaintEventArgs e) { }
     protected override void OnPaint(PaintEventArgs e) { }
+
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+    // Shown with native calls and without an owner: Form.Show or changing the owner move the activation, and the panel
+    // would close (or stop noticing clicks outside). It's a free topmost window raised above the panel each time.
+    public void ShowOver(Form panel) {
+        this.panel = panel;
+        if (!IsWindowVisible(Handle)) ShowWindow(Handle, 4); // SW_SHOWNOACTIVATE
+        SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010); // HWND_TOPMOST, NOSIZE | NOMOVE | NOACTIVATE
+    }
+
+    public void HideNow() { if (IsHandleCreated && IsWindowVisible(Handle)) ShowWindow(Handle, 0); }
+
+    public bool IsShown { get { return IsHandleCreated && IsWindowVisible(Handle); } }
 
     [StructLayout(LayoutKind.Explicit)] struct FloatBits { [FieldOffset(0)] public float F; [FieldOffset(0)] public int I; }
 
@@ -1676,7 +1717,7 @@ abstract class DarkPanel : Form {
     protected override void OnLocationChanged(EventArgs e) {
         base.OnLocationChanged(e);
         if (glass && Visible) { BuildGlass(); Render(); }
-        else if (hdr != null && !hdr.IsDisposed && hdr.Visible) hdr.Location = Location;
+        else if (hdr != null && !hdr.IsDisposed && hdr.IsShown) hdr.Location = Location;
     }
 
     protected override void OnSizeChanged(EventArgs e) {
@@ -1740,10 +1781,15 @@ abstract class DarkPanel : Form {
             HideHdr();
             return;
         }
-        if (!hdr.Visible) { hdr.Owner = this; hdr.Show(); }
+        bool wasActive = Form.ActiveForm == this;
+        hdr.ShowOver(this);
+        if (wasActive && Form.ActiveForm != this) Activate(); // showing the layer must not leave the panel inactive
     }
 
-    void HideHdr() { if (hdr != null && !hdr.IsDisposed && hdr.Visible) hdr.Hide(); }
+    void HideHdr() { if (hdr != null && !hdr.IsDisposed) hdr.HideNow(); }
+
+    // Our own HDR layer, so a focus change to it isn't taken as a click outside.
+    protected bool IsOwnOverlay(IntPtr h) { return hdr != null && !hdr.IsDisposed && hdr.IsHandleCreated && hdr.Handle == h; }
 
     void Render() {
         if (!glass || !IsHandleCreated) return;
@@ -1938,12 +1984,24 @@ class Popup : DarkPanel {
     public Popup() {
         ClientSize = new Size(Ui.P(300), Ui.P(318));
         KeyPreview = true;
-        Deactivate += delegate { if (MenuOpen) return; Hide(); HiddenAt = Environment.TickCount; };
+        // Close when the focus really went to another window (checked a moment later: a brief focus change, like the
+        // HDR layer appearing, must not close the panel).
+        Deactivate += delegate {
+            if (MenuOpen) return;
+            BeginInvoke((Action)delegate {
+                IntPtr fg = GetForegroundWindow();
+                if (!Visible || MenuOpen || fg == Handle || IsOwnOverlay(fg) || ContainsFocus) return;
+                Hide();
+                HiddenAt = Environment.TickCount;
+            });
+        };
     }
 
     protected override CreateParams CreateParams {
         get { var cp = base.CreateParams; cp.ExStyle |= 0x80; return cp; } // WS_EX_TOOLWINDOW: not in Alt+Tab
     }
+
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
 
     int W { get { return ClientSize.Width; } }
     protected override RectangleF SliderRow { get { return new RectangleF(Ui.P(18), Ui.P(64), W - Ui.P(36), Ui.P(28)); } }
@@ -2015,6 +2073,8 @@ class Popup : DarkPanel {
         int y = p.Y >= wa.Bottom ? wa.Bottom - Height - m : (p.Y <= wa.Top ? wa.Top + m : Math.Max(wa.Top + m, p.Y - Height - m));
         ShowFrosted(new Point(x, y));
         Activate();
+        // If showing the HDR layer moved the activation, take it back: otherwise a click outside wouldn't close the panel.
+        BeginInvoke((Action)delegate { if (Visible && GetForegroundWindow() != Handle) Activate(); });
     }
 
     int Hit(Point p) {
@@ -2183,8 +2243,9 @@ class Osd : DarkPanel {
         var at = Where();
         if (!Visible) ShowFrosted(at);
         else if (Location != at) Location = at;
-        // Back to the top of the always-on-top windows, without taking the focus.
+        // Back to the top of the always-on-top windows, without taking the focus (and its HDR layer above it).
         SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040); // NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW
+        UpdateHdr();
         if (!IsWindowVisible(Handle)) Log.Write("osd: window is not visible after showing it, at " + at);
         Restart();
     }
