@@ -1377,10 +1377,14 @@ abstract class DarkPanel : Form {
             if (!Animate()) anim.Stop();
             // Live backdrop: about 60 times a second, take again what's behind, blur it and bend it (the dock band of the
             // TV launcher does the same each frame), so moving video or windows show through the glass as they change.
-            if (LiveBackdrop && Visible && IsHandleCreated && unchecked(Environment.TickCount - lastLive) >= 16) {
+            // The pace adapts to what one update costs (at most half the time), so a big panel never starves clicks.
+            if (Live && Visible && IsHandleCreated && unchecked(Environment.TickCount - lastLive) >= liveEvery) {
                 lastLive = Environment.TickCount;
-                if (glass) { BuildGlass(); Render(true); return; }
-                if (!acrylic) { RefreshFrost(); Invalidate(); return; }
+                long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (glass) { BuildGlass(); Render(true); } else { RefreshFrost(); Invalidate(); Update(); }
+                double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                liveEvery = Math.Max(16, Math.Min(100, (int)(ms * 2)));
+                return;
             }
             if (SkipFrame()) return;
             // Only the light, the wave or the RGB edge move: reuse the glass and the content, redraw just those
@@ -1402,6 +1406,7 @@ abstract class DarkPanel : Form {
     protected virtual bool FollowsMouse { get { return false; } } // the light and wave of the glass: only on the shortcut bar
     protected virtual bool LiveBackdrop { get { return false; } } // what's behind is captured again while it's on screen
     protected virtual void PaintGlassInner(Graphics g) { }
+    bool Live { get { return LiveBackdrop && (glass || !acrylic); } } // native Acrylic is already live
 
     RectangleF PlateRect {
         get { float i = 0.6f * Ui.S; return new RectangleF(i, i, ClientSize.Width - 2 * i, ClientSize.Height - 2 * i); }
@@ -1410,7 +1415,7 @@ abstract class DarkPanel : Form {
     float PlateCorner { get { var p = PlateRect; return Math.Min(Corner, Math.Min(p.Width, p.Height) / 2f); } }
 
     // Steps the animations; returns false when they're all done.
-    int lastAnim, lastLive;
+    int lastAnim, lastLive, liveEvery = 16;
 
     protected virtual bool Animate() {
         int now = Environment.TickCount;
@@ -1418,7 +1423,7 @@ abstract class DarkPanel : Form {
         lastAnim = now;
         float goal = drag ? 1f : (hoverSlider ? 0.5f : 0f);
         grow = Ui.Toward(grow, goal, 1f - (float)Math.Pow(0.75, dt / 15f)); // by time, not by frame
-        bool more = grow != goal || (LiveBackdrop && Visible);
+        bool more = grow != goal || (Live && Visible);
         if (glass) more |= surface.Light.Step() | GlassCfg.Spinning;
         return more;
     }
@@ -1460,7 +1465,7 @@ abstract class DarkPanel : Form {
             Render();
             Show();
             Render();
-            if (GlassCfg.Spinning || LiveBackdrop) anim.Start();
+            if (GlassCfg.Spinning || Live) anim.Start();
             return;
         }
         if (!acrylic) {
@@ -1469,7 +1474,7 @@ abstract class DarkPanel : Form {
         }
         Show();
         Invalidate();
-        if (LiveBackdrop) anim.Start();
+        if (Live) anim.Start();
     }
 
     // Switches between the Windows 11 and Liquid Glass designs (the window is rebuilt the next time it shows).
@@ -1747,6 +1752,7 @@ abstract class DarkPanel : Form {
 
 // Panel that opens when you click the tray icon.
 class Popup : DarkPanel {
+    protected override bool LiveBackdrop { get { return true; } } // only while the panel is open: a few seconds
     static readonly string[] Labels = { "Eye Care", "Pixel Refresh", L.T("Entrada", "Input") };
     readonly bool[] on = new bool[3];
     int hot = -1;
