@@ -12,10 +12,11 @@ LG monitors with webOS (such as the UltraGear OLED "Smart" line or the MyView se
 - **On-screen bar** when you use the shortcuts. You can also drag it with the mouse.
 - **Eye Care** (the monitor's low blue light mode).
 - **Pixel Refresh**: asks the OLED monitor to clean its pixels the next time it turns off.
+- **Windows HDR switch**: the HDR badge next to the monitor name turns yellow when Windows HDR is on; click it to turn HDR on or off.
 - **Video input** switching: DisplayPort, HDMI, USB‑C, etc.
 - **Windows inactivity**: choose when the display turns off and when the PC sleeps ("Never" at the top), plus a shortcut to "Edit power plan".
 - **Native Windows 11 look**: real Acrylic and Mica backdrops and the Segoe UI Variable font. On Windows 10 the blur is imitated.
-- **Liquid Glass design** (optional, for the panel and the on-screen bar): the desktop behind bends at the edge of the glass with a hint of color separation, plus a lit rim, a specular reflection, an RGB edge, and on the shortcut bar a light that follows the mouse with a wave on click. Blur, darkening, bezel, reflection width and brightness, RGB intensity, hue and spin are all adjustable, with a live preview. Choose it in Settings → Design, or right-click the tray icon → Design.
+- **Liquid Glass design** (optional, for the panel and the on-screen bar): the desktop behind bends at the edge of the glass with a hint of color separation, plus a lit rim and an RGB edge. The shortcut bar reflects what's behind it in real time, and a light follows the mouse with a wave on click. Blur, darkening, bezel, RGB intensity, hue and spin are all adjustable, with a live preview. Choose it in Settings → Design, or right-click the tray icon → Design.
 - **Settings** (right-click the tray icon): shortcuts, on-screen bar duration and position, shortcut step, bar color, which rows the panel shows, monitor IP and start with Windows.
 
 | On-screen bar | Settings |

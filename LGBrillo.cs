@@ -98,9 +98,6 @@ class Config {
     public double GDarken { get; set; }
     public bool GRefract { get; set; }
     public double GBezel { get; set; }
-    public bool GSpec { get; set; }
-    public double GSpecWidth { get; set; }
-    public double GSpecBright { get; set; }
     public bool GRgbOn { get; set; }
     public double GRgb { get; set; }
     public double GRgbHue { get; set; }
@@ -111,7 +108,7 @@ class Config {
 
     public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF";
         UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down;
-        Design = "win11"; GBlur = 0.45; GDarken = 0.3; GRefract = true; GBezel = 0.45; GSpec = true; GSpecWidth = 0.4; GSpecBright = 1;
+        Design = "win11"; GBlur = 0.45; GDarken = 0.3; GRefract = true; GBezel = 0.45;
         GRgbOn = true; GRgb = 0.35; GRgbHue = 0; GRgbAnim = false; GRgbSpeed = 0.4; GLight = true; GWave = "normal";
  }
 
@@ -814,38 +811,36 @@ static class Ui {
 // the on-screen bar and the preview in the glass settings window.
 static class GlassCfg {
     public static bool On;
-    public static float Blur = 0.45f, Darken = 0.3f, Bezel = 0.45f, SpecWidth = 0.4f, SpecBright = 1f;
+    public static float Blur = 0.45f, Darken = 0.3f, Bezel = 0.45f;
     public static float Rgb = 0.35f, RgbHue = 0f, RgbSpeed = 0.4f;
-    public static bool Refract = true, Spec = true, RgbOn = true, RgbAnim = false, Light = true;
+    public static bool Refract = true, RgbOn = true, RgbAnim = false, Light = true;
     public static int WaveMs = 850;
     public static int Rev; // bumps when something baked into the lens (blur, bezel, refraction) changes
 
     public static void Reset() {
-        Blur = 0.45f; Darken = 0.3f; Bezel = 0.45f; SpecWidth = 0.4f; SpecBright = 1f;
+        Blur = 0.45f; Darken = 0.3f; Bezel = 0.45f;
         Rgb = 0.35f; RgbHue = 0f; RgbSpeed = 0.4f;
-        Refract = true; Spec = true; RgbOn = true; RgbAnim = false; Light = true; WaveMs = 850;
+        Refract = true; RgbOn = true; RgbAnim = false; Light = true; WaveMs = 850;
         Rev++;
     }
 
     public static void From(Config c) {
         On = c.Design == "glass";
         Blur = (float)c.GBlur; Darken = (float)c.GDarken; Bezel = (float)c.GBezel;
-        SpecWidth = (float)c.GSpecWidth; SpecBright = (float)c.GSpecBright;
         Rgb = (float)c.GRgb; RgbHue = (float)c.GRgbHue; RgbSpeed = (float)c.GRgbSpeed;
-        Refract = c.GRefract; Spec = c.GSpec; RgbOn = c.GRgbOn; RgbAnim = c.GRgbAnim; Light = c.GLight;
+        Refract = c.GRefract; RgbOn = c.GRgbOn; RgbAnim = c.GRgbAnim; Light = c.GLight;
         WaveMs = c.GWave == "lenta" ? 1300 : c.GWave == "rapida" ? 480 : 850;
         Rev++;
     }
 
     public static void Into(Config c) {
-        c.GBlur = Blur; c.GDarken = Darken; c.GBezel = Bezel; c.GSpecWidth = SpecWidth; c.GSpecBright = SpecBright;
+        c.GBlur = Blur; c.GDarken = Darken; c.GBezel = Bezel;
         c.GRgb = Rgb; c.GRgbHue = RgbHue; c.GRgbSpeed = RgbSpeed;
-        c.GRefract = Refract; c.GSpec = Spec; c.GRgbOn = RgbOn; c.GRgbAnim = RgbAnim; c.GLight = Light;
+        c.GRefract = Refract; c.GRgbOn = RgbOn; c.GRgbAnim = RgbAnim; c.GLight = Light;
         c.GWave = WaveMs >= 1300 ? "lenta" : WaveMs <= 480 ? "rapida" : "normal";
     }
 
     public static float BezelPx { get { return (4f + 16f * Bezel) * Ui.S; } }
-    public static float SpecWidthPx { get { return (0.8f + 2.7f * SpecWidth) * Ui.S; } }
     public static float RgbAmount { get { return RgbOn ? Rgb : 0f; } }
     public static bool Spinning { get { return RgbOn && RgbAnim; } }
 
@@ -1258,7 +1253,9 @@ class GlassSurface {
 
     // shot: what's behind the whole window. plate: the glass shape. drops: small round glass buttons inside it.
     public void Build(Bitmap shot, RectangleF plate, float radius, RectangleF[] drops) {
+        var keepRgb = rgb != null && rgb.Size == shot.Size ? rgb : null;
         Clear();
+        rgb = keepRgb;
         int w = shot.Width, h = shot.Height;
         using (var blurred = Glass.Blurred(shot, GlassCfg.Blur)) {
             int[] src = Glass.Pixels(blurred);
@@ -1287,13 +1284,11 @@ class GlassSurface {
             using (var b = new SolidBrush(Color.FromArgb((int)(dk * 0.65f * 255), 10, 10, 14))) g.FillPath(b, path);
         using (var b = Glass.Vertical(rect, Color.FromArgb(bright ? 0x40 : 0x1A, 255, 255, 255), Color.FromArgb(bright ? 0x1A : 0x05, 255, 255, 255)))
             g.FillPath(b, path);
-        if (GlassCfg.Spec) {
-            var st = g.Save();
-            g.SetClip(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height / 2f), CombineMode.Intersect);
-            using (var b = Glass.Vertical(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height / 2f), Color.FromArgb(bright ? 0x40 : 0x24, 255, 255, 255), Color.FromArgb(0, 255, 255, 255)))
-                g.FillPath(b, path);
-            g.Restore(st);
-        }
+        var st = g.Save();
+        g.SetClip(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height / 2f), CombineMode.Intersect);
+        using (var b = Glass.Vertical(new RectangleF(rect.X, rect.Y, rect.Width, rect.Height / 2f), Color.FromArgb(bright ? 0x40 : 0x24, 255, 255, 255), Color.FromArgb(0, 255, 255, 255)))
+            g.FillPath(b, path);
+        g.Restore(st);
     }
 
     // Light that follows the pointer (halo inside + lit rim near it) and the wave that spreads on release.
@@ -1336,7 +1331,7 @@ class GlassSurface {
         g.Restore(st);
     }
 
-    // RGB edge, the rim (strong at the top, faint at the bottom) and the specular reflection along the top-left edge.
+    // RGB edge and the rim (strong at the top, faint at the bottom).
     public void Edges(Graphics g, GraphicsPath path, RectangleF rect, float radius, bool bright, bool withRgb, Size win) {
         float amount = withRgb ? GlassCfg.RgbAmount : 0f;
         if (amount > 0.01f) {
@@ -1345,21 +1340,7 @@ class GlassSurface {
         }
         float k = amount > 0.01f ? 1f - amount * 0.6f : 1f;
         using (var b = Glass.Vertical(rect, Color.FromArgb((int)((bright ? 0xE6 : 0xA6) * k), 255, 255, 255), Color.FromArgb((int)(0x26 * k), 255, 255, 255)))
-        using (var p = new Pen(b, (GlassCfg.Spec ? 1.3f : 1f) * Ui.S)) g.DrawPath(p, path);
-        if (!GlassCfg.Spec) return;
-        // Gradient from the top-left corner along (0.35 w, h), clamped so it doesn't start over at the far corner
-        float vx = rect.Width * 0.35f, vy = rect.Height;
-        float tMax = Math.Max(1f, (rect.Width * vx + rect.Height * vy) / (vx * vx + vy * vy));
-        var a = new PointF(rect.X, rect.Y);
-        var z = new PointF(rect.X + vx * tMax, rect.Y + vy * tMax);
-        using (var b = new LinearGradientBrush(a, z, Color.White, Color.Transparent)) {
-            var blend = new ColorBlend(4);
-            blend.Colors = new[] { Glass.White(0.35f + 0.4f * GlassCfg.SpecBright), Glass.White(0.1f), Glass.White(0f), Glass.White(0f) };
-            blend.Positions = new[] { 0f, 0.35f / tMax, 0.7f / tMax, 1f };
-            b.InterpolationColors = blend;
-            float wpx = bright ? Math.Min(GlassCfg.SpecWidthPx, 2f * Ui.S) : GlassCfg.SpecWidthPx;
-            using (var p = new Pen(b, wpx)) g.DrawPath(p, path);
-        }
+        using (var p = new Pen(b, 1.3f * Ui.S)) g.DrawPath(p, path);
     }
 }
 
@@ -1394,6 +1375,13 @@ abstract class DarkPanel : Form {
         anim.Tick += delegate {
             float g0 = grow;
             if (!Animate()) anim.Stop();
+            // Live backdrop: about 60 times a second, take again what's behind, blur it and bend it (the dock band of the
+            // TV launcher does the same each frame), so moving video or windows show through the glass as they change.
+            if (LiveBackdrop && Visible && IsHandleCreated && unchecked(Environment.TickCount - lastLive) >= 16) {
+                lastLive = Environment.TickCount;
+                if (glass) { BuildGlass(); Render(true); return; }
+                if (!acrylic) { RefreshFrost(); Invalidate(); return; }
+            }
             if (SkipFrame()) return;
             // Only the light, the wave or the RGB edge move: reuse the glass and the content, redraw just those
             if (glass && grow == g0 && !drag) Render(false);
@@ -1412,6 +1400,7 @@ abstract class DarkPanel : Form {
     protected virtual float LightGain { get { return 0.7f; } }
     protected virtual RectangleF[] Drops { get { return null; } }
     protected virtual bool FollowsMouse { get { return false; } } // the light and wave of the glass: only on the shortcut bar
+    protected virtual bool LiveBackdrop { get { return false; } } // what's behind is captured again while it's on screen
     protected virtual void PaintGlassInner(Graphics g) { }
 
     RectangleF PlateRect {
@@ -1421,7 +1410,7 @@ abstract class DarkPanel : Form {
     float PlateCorner { get { var p = PlateRect; return Math.Min(Corner, Math.Min(p.Width, p.Height) / 2f); } }
 
     // Steps the animations; returns false when they're all done.
-    int lastAnim;
+    int lastAnim, lastLive;
 
     protected virtual bool Animate() {
         int now = Environment.TickCount;
@@ -1429,7 +1418,7 @@ abstract class DarkPanel : Form {
         lastAnim = now;
         float goal = drag ? 1f : (hoverSlider ? 0.5f : 0f);
         grow = Ui.Toward(grow, goal, 1f - (float)Math.Pow(0.75, dt / 15f)); // by time, not by frame
-        bool more = grow != goal;
+        bool more = grow != goal || (LiveBackdrop && Visible);
         if (glass) more |= surface.Light.Step() | GlassCfg.Spinning;
         return more;
     }
@@ -1471,7 +1460,7 @@ abstract class DarkPanel : Form {
             Render();
             Show();
             Render();
-            if (GlassCfg.Spinning) anim.Start();
+            if (GlassCfg.Spinning || LiveBackdrop) anim.Start();
             return;
         }
         if (!acrylic) {
@@ -1480,6 +1469,7 @@ abstract class DarkPanel : Form {
         }
         Show();
         Invalidate();
+        if (LiveBackdrop) anim.Start();
     }
 
     // Switches between the Windows 11 and Liquid Glass designs (the window is rebuilt the next time it shows).
@@ -1762,8 +1752,10 @@ class Popup : DarkPanel {
     int hot = -1;
     string title = L.T("Monitor LG", "LG monitor"), sub = "", status = L.T("Conectando…", "Connecting…"), input = "—";
     string screenOff = "—", sleep = "—";
-    public const int RowScreen = 10, RowSleep = 11, RowPlan = 12, ChipBase = 100, ExpandInput = 2;
-    bool connected;
+    public const int RowScreen = 10, RowSleep = 11, RowPlan = 12, ItemHdr = 20, ChipBase = 100, ExpandInput = 2;
+    bool connected, hdrOn, hdrSupported;
+    RectangleF badge;
+    public event Action HdrClicked; // the HDR button: turns Windows HDR on or off
     public int HiddenAt;
     public event Action<int> ButtonClicked;
     public event Action<int, int> ChoiceClicked; // which list (ExpandInput, RowScreen, RowSleep) and the option
@@ -1910,6 +1902,7 @@ class Popup : DarkPanel {
     }
 
     public bool IsOn(int i) { return on[i]; }
+    public void SetHdr(bool supported, bool enabled) { hdrSupported = supported; hdrOn = enabled; Invalidate(); }
     public void SetTimes(string screen, string sl) { screenOff = screen; sleep = sl; Invalidate(); }
     public void SetButton(int i, bool v) { on[i] = v; Invalidate(); }
     public void SetTitle(string t, string s) { title = t; sub = s; Invalidate(); }
@@ -1928,6 +1921,7 @@ class Popup : DarkPanel {
     }
 
     int Hit(Point p) {
+        if (hdrSupported && badge.Contains(p)) return ItemHdr;
         for (int i = 0; i < choices.Count && expanded >= 0; i++) if (Chip(i).Contains(p)) return ChipBase + i;
         for (int i = 0; i < Labels.Length; i++) if (Column(i).Contains(p)) return i;
         foreach (int r in new[] { RowScreen, RowSleep, RowPlan }) if (RowOn(r) && Row(r).Contains(p)) return r;
@@ -1943,6 +1937,7 @@ class Popup : DarkPanel {
     protected override void ItemClick(Point p) {
         int h = Hit(p);
         if (h >= ChipBase) { if (ChoiceClicked != null) ChoiceClicked(expanded, h - ChipBase); }
+        else if (h == ItemHdr) { if (HdrClicked != null) HdrClicked(); }
         else if (h >= 0 && ButtonClicked != null) ButtonClicked(h);
     }
 
@@ -1997,6 +1992,19 @@ class Popup : DarkPanel {
 
         float tw = Math.Min(g.MeasureString(title, fTitle, PointF.Empty, StringFormat.GenericTypographic).Width, W - 2 * pad - Ui.P(100));
         Ui.DrawText(g, title, fTitle, new RectangleF(pad, Ui.P(12), tw + Ui.P(4), Ui.P(24)), Ui.Text, StringAlignment.Near);
+        // HDR button: yellow when Windows HDR is on, outlined when it's off. Tapping it switches Windows HDR.
+        if (hdrSupported) {
+            badge = new RectangleF(pad + tw + Ui.P(10), Ui.P(15), Ui.P(38), Ui.P(19));
+            bool hov = hot == ItemHdr;
+            using (var path = Ui.RoundRect(badge, Ui.P(5))) {
+                if (hdrOn) using (var b = new SolidBrush(hov ? Color.FromArgb(255, 226, 80) : Color.FromArgb(255, 214, 10))) g.FillPath(b, path);
+                else {
+                    if (hov) using (var b = new SolidBrush(Color.FromArgb(30, 255, 255, 255))) g.FillPath(b, path);
+                    using (var p = new Pen(Color.FromArgb(hov ? 240 : 190, 255, 255, 255), Math.Max(1f, 1.2f * Ui.S))) g.DrawPath(p, path);
+                }
+            }
+            Ui.DrawText(g, "HDR", fBadge, badge, hdrOn ? Color.FromArgb(28, 28, 30) : Color.FromArgb(hov ? 255 : 220, 255, 255, 255), StringAlignment.Center);
+        } else badge = RectangleF.Empty;
         if (value >= 0 && !glass) // the glass bar shows it inside
             Ui.DrawText(g, value + "%", fSmall, new RectangleF(W - pad - Ui.P(50), Ui.P(12), Ui.P(50), Ui.P(24)), Ui.Text2, StringAlignment.Far);
         string s = sub;
@@ -2127,6 +2135,7 @@ class Osd : DarkPanel {
     }
 
     protected override bool FollowsMouse { get { return message == null; } }
+    protected override bool LiveBackdrop { get { return true; } }
 
     protected override void OnMouseDown(MouseEventArgs e) { if (message == null) base.OnMouseDown(e); }
     protected override void OnMouseWheel(MouseEventArgs e) { if (message == null) base.OnMouseWheel(e); }
@@ -2805,11 +2814,6 @@ class GlassSettingsForm : Form {
         Check(0, L.T("Refracción en el borde", "Edge refraction"), () => GlassCfg.Refract, v => { GlassCfg.Refract = v; GlassCfg.Rev++; }, null);
         Slider(0, L.T("Bisel", "Bezel"), () => GlassCfg.Bezel, v => { GlassCfg.Bezel = v; GlassCfg.Rev++; },
             v => Math.Round(4 + 16 * v) + " dp", () => GlassCfg.Refract);
-        Head(0, L.T("Reflector", "Reflector"));
-        Check(0, L.T("Reflejo especular en el borde", "Specular edge reflection"), () => GlassCfg.Spec, v => GlassCfg.Spec = v, null);
-        Slider(0, L.T("Ancho del reflejo", "Reflection width"), () => GlassCfg.SpecWidth, v => GlassCfg.SpecWidth = v,
-            v => Math.Max(1, Math.Round(0.8 + 2.7 * v)) + " dp", () => GlassCfg.Spec);
-        Slider(0, L.T("Brillo del reflejo", "Reflection brightness"), () => GlassCfg.SpecBright, v => GlassCfg.SpecBright = v, Pct, () => GlassCfg.Spec);
 
         Head(1, L.T("Borde RGB", "RGB edge"));
         Check(1, L.T("Borde RGB", "RGB edge"), () => GlassCfg.RgbOn, v => GlassCfg.RgbOn = v, null);
@@ -2987,6 +2991,58 @@ static class Power {
     }
 }
 
+// Windows HDR ("advanced color") of the display: read it and turn it on or off, like the switch in Windows Settings.
+static class Hdr {
+    [StructLayout(LayoutKind.Sequential)] struct Luid { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)] struct PathSource { public Luid Adapter; public uint Id, ModeIdx, Status; }
+    [StructLayout(LayoutKind.Sequential)] struct PathTarget {
+        public Luid Adapter; public uint Id, ModeIdx, Tech, Rotation, Scaling, RefreshN, RefreshD, ScanLine; public int Available; public uint Status;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct PathInfo { public PathSource Source; public PathTarget Target; public uint Flags; }
+    [StructLayout(LayoutKind.Sequential, Size = 64)] struct ModeInfo { public uint Type; }
+    [StructLayout(LayoutKind.Sequential)] struct AdvancedColor { public uint Type, Size; public Luid Adapter; public uint Id; public uint Value, Encoding, Bits; }
+    [StructLayout(LayoutKind.Sequential)] struct SetColor { public uint Type, Size; public Luid Adapter; public uint Id; public uint Value; }
+
+    [DllImport("user32.dll")] static extern int GetDisplayConfigBufferSizes(uint flags, out uint paths, out uint modes);
+    [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint flags, ref uint np, [Out] PathInfo[] paths, ref uint nm, [Out] ModeInfo[] modes, IntPtr topology);
+    [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref AdvancedColor info);
+    [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref SetColor info);
+
+    static PathInfo[] Paths() {
+        uint np, nm;
+        if (GetDisplayConfigBufferSizes(2, out np, out nm) != 0) return new PathInfo[0]; // QDC_ONLY_ACTIVE_PATHS
+        var paths = new PathInfo[np];
+        var modes = new ModeInfo[nm];
+        if (QueryDisplayConfig(2, ref np, paths, ref nm, modes, IntPtr.Zero) != 0) return new PathInfo[0];
+        return paths;
+    }
+
+    static uint Info(PathInfo p) {
+        var a = new AdvancedColor { Type = 9, Size = (uint)Marshal.SizeOf(typeof(AdvancedColor)), Adapter = p.Target.Adapter, Id = p.Target.Id }; // GET_ADVANCED_COLOR_INFO
+        return DisplayConfigGetDeviceInfo(ref a) == 0 ? a.Value : 0;
+    }
+
+    // Bit 0: the display can do HDR. Bit 1: HDR is on.
+    public static bool Supported() { try { foreach (var p in Paths()) if ((Info(p) & 1) != 0) return true; } catch { } return false; }
+    public static bool Enabled() { try { foreach (var p in Paths()) if ((Info(p) & 2) != 0) return true; } catch { } return false; }
+
+    // Turns HDR on or off on every display that supports it. Returns false if Windows refused.
+    public static bool Set(bool on) {
+        bool ok = false;
+        try {
+            foreach (var p in Paths()) {
+                if ((Info(p) & 1) == 0) continue;
+                var s = new SetColor { Type = 10, Size = (uint)Marshal.SizeOf(typeof(SetColor)), Adapter = p.Target.Adapter, Id = p.Target.Id, Value = on ? 1u : 0u }; // SET_ADVANCED_COLOR_STATE
+                int r = DisplayConfigSetDeviceInfo(ref s);
+                if (r != 0) { s.Type = 16; r = DisplayConfigSetDeviceInfo(ref s); } // SET_HDR_STATE (Windows 11 24H2)
+                if (r == 0) ok = true;
+                else Log.Write("hdr switch refused by Windows: " + r);
+            }
+        } catch (Exception ex) { Log.Write("hdr switch failed: " + ex.Message); }
+        return ok;
+    }
+}
+
 class DarkMenuColors : ProfessionalColorTable {
     static readonly Color Bg = Color.FromArgb(38, 38, 40), Edge = Color.FromArgb(62, 62, 66), Sel = Color.FromArgb(58, 58, 64);
     public override Color ToolStripDropDownBackground { get { return Bg; } }
@@ -3130,7 +3186,9 @@ class App : ApplicationContext {
         popup.SetButton(0, cfg.EyeCare);
         popup.SetButton(1, cfg.PixelRefresh);
         RefreshTimes();
-        SystemEvents.DisplaySettingsChanged += delegate { osd.ResetWindow(); popup.ResetWindow(); };
+        SystemEvents.DisplaySettingsChanged += delegate { osd.ResetWindow(); popup.ResetWindow(); RefreshHdr(); };
+        popup.HdrClicked += ToggleWindowsHdr;
+        RefreshHdr();
         SystemEvents.PowerModeChanged += (s, e) => { if (e.Mode == PowerModes.Resume) { Log.Write("pc resumed"); Wake(); } };
         hk.DisplayPower += on => {
             if (on == displayOn) return;
@@ -3246,6 +3304,7 @@ class App : ApplicationContext {
         if (popup.Visible) { popup.Hide(); return; }
         if (unchecked(Environment.TickCount - popup.HiddenAt) < 250) return; // the click that closed it
         RefreshTimes();
+        RefreshHdr();
         popup.ShowNear(Cursor.Position);
         if (!tv.Connected) { var _ = EnsureConnected(); }
         else RefreshInput();
@@ -3442,6 +3501,19 @@ class App : ApplicationContext {
         if (!ok) tray.ShowBalloonTip(5000, "LGBrillo", L.T("Windows no dejó cambiar ese tiempo.", "Windows did not allow changing that time."), ToolTipIcon.Warning);
         RefreshTimes();
         popup.Collapse();
+    }
+
+    void RefreshHdr() { popup.SetHdr(Hdr.Supported(), Hdr.Enabled()); }
+
+    // The HDR button of the panel: switches Windows HDR, then shows the state Windows really ended up in.
+    async void ToggleWindowsHdr() {
+        bool want = !Hdr.Enabled();
+        popup.SetHdr(true, want);
+        bool ok = Hdr.Set(want);
+        Log.Write("windows hdr " + (want ? "on" : "off") + (ok ? "" : " (refused)"));
+        await Task.Delay(ok ? 900 : 100);
+        RefreshHdr();
+        if (!ok) tray.ShowBalloonTip(5000, "LGBrillo", L.T("Windows no dejó cambiar el HDR.", "Windows did not allow changing HDR."), ToolTipIcon.Warning);
     }
 
     void RefreshTimes() {
