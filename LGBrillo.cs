@@ -116,6 +116,7 @@ class Config {
     public bool HdrLight { get; set; }
     public bool HdrInPanel { get; set; }
     public bool HdrInOsd { get; set; }
+    public bool LunaBlocked { get; set; } // this monitor's firmware refuses Eye Care / Pixel Refresh over the network
 
     public Config() { Ip = ""; Key = ""; Paso = 5; Name = ""; OsdSegundos = 1.5; OsdPos = "abajo"; Color = "#0A84FF";
         UpMods = 3; UpKey = (int)Keys.Up; DownMods = 3; DownKey = (int)Keys.Down;
@@ -292,7 +293,10 @@ class Tv {
         TaskCompletionSource<Dictionary<string, object>> t;
         if (id != null && pend.TryGetValue(id, out t)) {
             pend.Remove(id);
-            if (type == "error") t.TrySetException(new Exception(Str(m, "error") ?? "error"));
+            if (type == "error") {
+                string why = Str(payload, "errorText");
+                t.TrySetException(new Exception((Str(m, "error") ?? "error") + (why != null ? " (" + why + ")" : "")));
+            }
             else t.TrySetResult(payload ?? new Dictionary<string, object>());
         }
     }
@@ -395,7 +399,7 @@ class Tv {
     // Pixel Refresh (OLED pixel cleaning) the next time it turns off. It can't be read either.
     public Task SetPixelRefresh(bool on) { return SetSetting("picture", "scheduledPixelCleaning", on ? "on" : "off"); }
 
-    bool lunaBlocked; // the alert trick got no answer once: this firmware closed it
+    public bool LunaBlocked; // the alert trick got no answer once: this firmware closed it (remembered in the config)
 
     // First the official setSystemSettings (the monitor accepts it for brightness, in a few ms and without any alert).
     // Keys it refuses go through luna with the alert trick, which older firmware answers at once.
@@ -407,7 +411,7 @@ class Tv {
         try { await Request("ssap://settings/setSystemSettings", prm, 4000); return; }
         catch (Exception ex) { official = ex; }
         if (!Connected) throw official;
-        if (lunaBlocked) throw new NotSupportedException(L.T("el monitor no permite cambiar esto por red", "the monitor doesn't allow changing this over the network"));
+        if (LunaBlocked) throw new NotSupportedException(L.T("el monitor no permite cambiar esto por red", "the monitor doesn't allow changing this over the network"));
         var act = new Dictionary<string, object> { { "uri", LunaSet }, { "params", prm } };
         Dictionary<string, object> r;
         try {
@@ -417,7 +421,7 @@ class Tv {
                 { "onclose", act }, { "onfail", act }
             }, 3000, false);
         } catch (TimeoutException) {
-            lunaBlocked = true;
+            LunaBlocked = true;
             Log.Write("luna alert trick unanswered: " + key + " can't be set on this firmware");
             throw new NotSupportedException(L.T("el monitor no permite cambiar esto por red", "the monitor doesn't allow changing this over the network"));
         }
@@ -920,10 +924,18 @@ class HdrOverlay : Form {
     protected override CreateParams CreateParams {
         get {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x00200000 | 0x80 | 0x08000000 | 0x20 | 0x8; // NOREDIRECTIONBITMAP | TOOLWINDOW | NOACTIVATE | TRANSPARENT | TOPMOST
-            cp.Style |= 0x08000000; // WS_DISABLED: it can never take the focus away from the panel
+            // NOREDIRECTIONBITMAP | TOOLWINDOW | NOACTIVATE | TRANSPARENT | TOPMOST | LAYERED: layered + transparent is
+            // what makes Windows skip the window entirely when it decides where a click goes.
+            cp.ExStyle |= 0x00200000 | 0x80 | 0x08000000 | 0x20 | 0x8 | 0x80000;
             return cp;
         }
+    }
+
+    [DllImport("user32.dll")] static extern bool SetLayeredWindowAttributes(IntPtr h, uint key, byte alpha, uint flags);
+
+    protected override void OnHandleCreated(EventArgs e) {
+        base.OnHandleCreated(e);
+        SetLayeredWindowAttributes(Handle, 0, 255, 2); // LWA_ALPHA, fully opaque: the swap chain decides the transparency
     }
 
     Form panel;
@@ -1328,7 +1340,8 @@ class GlassLight {
         int now = Environment.TickCount;
         float dt = last == 0 ? 15 : Math.Min(50, Math.Max(1, now - last));
         last = now;
-        Pos = new PointF(Pos.X + (Target.X - Pos.X) * 0.32f, Pos.Y + (Target.Y - Pos.Y) * 0.32f);
+        float k = 1f - (float)Math.Pow(0.68, dt / 15f);
+        Pos = new PointF(Pos.X + (Target.X - Pos.X) * k, Pos.Y + (Target.Y - Pos.Y) * k);
         if (Level < Goal) Level = Math.Min(Goal, Level + dt / 140f);
         else if (Level > Goal) Level = Math.Max(Goal, Level - dt / 320f);
         if (Wave < 1f) {
@@ -1337,6 +1350,54 @@ class GlassLight {
         }
         float dx = Target.X - Pos.X, dy = Target.Y - Pos.Y;
         return Level != Goal || Wave < 1f || dx * dx + dy * dy > 0.25f;
+    }
+}
+
+// Ticks once per frame of the monitor: a background thread waits for each composition (DwmFlush returns at the
+// display's refresh: 60, 144, 240 Hz...) and asks the UI thread for a frame. WinForms timers stop at about 64 Hz.
+class FrameClock {
+    [DllImport("dwmapi.dll")] static extern int DwmFlush();
+    static readonly List<FrameClock> running = new List<FrameClock>();
+    static Thread thread;
+    static SynchronizationContext ui;
+    static int pending;
+    public event EventHandler Tick;
+    public bool Enabled { get; private set; }
+
+    public void Start() {
+        if (Enabled) return;
+        // Started on the UI thread: post the frames back to it (creating the WinForms context if it isn't there yet)
+        if (ui == null) ui = SynchronizationContext.Current as WindowsFormsSynchronizationContext ?? new WindowsFormsSynchronizationContext();
+        Enabled = true;
+        lock (running) {
+            running.Add(this);
+            if (thread == null) {
+                thread = new Thread(Loop) { IsBackground = true, Name = "frames" };
+                thread.Start();
+            }
+            Monitor.PulseAll(running);
+        }
+    }
+
+    public void Stop() {
+        if (!Enabled) return;
+        Enabled = false;
+        lock (running) running.Remove(this);
+    }
+
+    static void Loop() {
+        while (true) {
+            lock (running) while (running.Count == 0) Monitor.Wait(running);
+            if (DwmFlush() != 0) Thread.Sleep(4);
+            if (Interlocked.Exchange(ref pending, 1) == 1) continue; // the last frame isn't drawn yet: skip this one
+            ui.Post(delegate { Interlocked.Exchange(ref pending, 0); FireAll(); }, null);
+        }
+    }
+
+    static void FireAll() {
+        FrameClock[] list;
+        lock (running) list = running.ToArray();
+        foreach (var c in list) if (c.Enabled && c.Tick != null) c.Tick(c, EventArgs.Empty);
     }
 }
 
@@ -1591,11 +1652,11 @@ abstract class DarkPanel : Form {
     protected int value = -1;
     protected bool drag, hoverSlider;
     protected float grow;
-    protected readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
+    protected readonly FrameClock anim = new FrameClock();
     protected bool acrylic;
     protected bool glass; // Liquid Glass design (decided when the window is created)
     protected readonly GlassSurface surface = new GlassSurface();
-    Bitmap buffer, hdrLayer;
+    Bitmap buffer, hdrLayer, baseLayer, contentLayer; // buffer lives in a DIB section reused by every frame
     HdrOverlay hdr;
     bool renderQueued;
     protected readonly Font fTitle = Ui.F("Segoe UI Variable Display Semib", "Segoe UI Semibold", 11f, FontStyle.Regular);
@@ -1614,8 +1675,12 @@ abstract class DarkPanel : Form {
         BackColor = Color.Black;
         DoubleBuffered = true;
         anim.Tick += delegate {
+            float g0 = grow;
             if (!Animate()) anim.Stop();
-            if (!SkipFrame()) Invalidate();
+            if (SkipFrame()) return;
+            // Only the light, the wave or the RGB edge move: reuse the glass and the content, redraw just those
+            if (glass && grow == g0 && !drag) Render(false);
+            else Invalidate();
         };
     }
 
@@ -1638,9 +1703,14 @@ abstract class DarkPanel : Form {
     float PlateCorner { get { var p = PlateRect; return Math.Min(Corner, Math.Min(p.Width, p.Height) / 2f); } }
 
     // Steps the animations; returns false when they're all done.
+    int lastAnim;
+
     protected virtual bool Animate() {
+        int now = Environment.TickCount;
+        float dt = lastAnim == 0 ? 15 : Math.Max(1, Math.Min(50, now - lastAnim));
+        lastAnim = now;
         float goal = drag ? 1f : (hoverSlider ? 0.5f : 0f);
-        grow = Ui.Toward(grow, goal, 0.25f);
+        grow = Ui.Toward(grow, goal, 1f - (float)Math.Pow(0.75, dt / 15f)); // by time, not by frame
         bool more = grow != goal;
         if (glass) more |= surface.Light.Step() | GlassCfg.Spinning;
         return more;
@@ -1648,11 +1718,11 @@ abstract class DarkPanel : Form {
 
     int lastFrame;
 
-    // While only the RGB edge turns, repaint at about 30 frames per second instead of every tick.
+    // While only the RGB edge turns, repaint at about 60 frames per second instead of every refresh.
     protected bool SkipFrame() {
         if (!glass || drag || grow != (hoverSlider ? 0.5f : 0f) || surface.Light.Active) return false;
         int now = Environment.TickCount;
-        if (now - lastFrame < 33) return true;
+        if (now - lastFrame < 16) return true;
         lastFrame = now;
         return false;
     }
@@ -1698,6 +1768,8 @@ abstract class DarkPanel : Form {
     public void ResetDesign() {
         if (Visible) Hide();
         if (hdr != null) { hdr.Dispose(); hdr = null; }
+        FreeDib();
+        if (baseLayer != null) { baseLayer.Dispose(); baseLayer = null; }
         surface.Clear();
         if (frost != null) { frost.Dispose(); frost = null; }
         if (IsHandleCreated) RecreateHandle();
@@ -1711,14 +1783,33 @@ abstract class DarkPanel : Form {
 
     [DllImport("user32.dll")] static extern bool SetWindowDisplayAffinity(IntPtr h, uint affinity);
 
-    // Screen captures include our own glass window: leave it out just for this capture, so it sees what's behind it.
+    // Screen captures include our own windows (the panel and its HDR layer): leave them out just for this capture.
+    bool ExcludeFromCapture(bool exclude) {
+        bool any = false;
+        if (IsHandleCreated && Visible) any |= SetWindowDisplayAffinity(Handle, exclude ? 0x11u : 0u); // WDA_EXCLUDEFROMCAPTURE
+        if (hdr != null && !hdr.IsDisposed && hdr.IsShown) any |= SetWindowDisplayAffinity(hdr.Handle, exclude ? 0x11u : 0u);
+        return any;
+    }
+
     void BuildGlass() {
-        bool hidden = IsHandleCreated && Visible && SetWindowDisplayAffinity(Handle, 0x11); // WDA_EXCLUDEFROMCAPTURE
+        bool hidden = ExcludeFromCapture(true);
         try {
             using (var shot = Glass.Capture(new Rectangle(Location, ClientSize)))
                 surface.Build(shot, PlateRect, PlateCorner, Drops);
         } finally {
-            if (hidden) SetWindowDisplayAffinity(Handle, 0);
+            if (hidden) ExcludeFromCapture(false);
+        }
+    }
+
+    // Windows 11 design without native Acrylic: the blurred picture behind has to follow the window's new place and size.
+    void RefreshFrost() {
+        if (glass || acrylic || !IsHandleCreated) return;
+        bool hidden = ExcludeFromCapture(true);
+        try {
+            if (frost != null) frost.Dispose();
+            frost = Ui.Frost(new Rectangle(Location, ClientSize));
+        } finally {
+            if (hidden) ExcludeFromCapture(false);
         }
     }
 
@@ -1729,7 +1820,7 @@ abstract class DarkPanel : Form {
         moving = true;
         try { Bounds = r; } finally { moving = false; }
         if (glass && Visible) { BuildGlass(); Render(); }
-        else Invalidate();
+        else { if (Visible) RefreshFrost(); Invalidate(); }
     }
 
     protected override void OnLocationChanged(EventArgs e) {
@@ -1743,6 +1834,7 @@ abstract class DarkPanel : Form {
         base.OnSizeChanged(e);
         if (moving) return;
         if (glass && Visible) { BuildGlass(); Render(); }
+        else if (Visible) RefreshFrost();
     }
 
     // Glass windows are drawn into a bitmap and handed to Windows with their transparency (UpdateLayeredWindow).
@@ -1812,33 +1904,101 @@ abstract class DarkPanel : Form {
     // Our own HDR layer, so a focus change to it isn't taken as a click outside.
     protected bool IsOwnOverlay(IntPtr h) { return hdr != null && !hdr.IsDisposed && hdr.IsHandleCreated && hdr.Handle == h; }
 
-    void Render() {
+    static void Quality(Graphics g) {
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+    }
+
+    static void Fresh(ref Bitmap b, Size s) {
+        if (b != null && b.Size == s) return;
+        if (b != null) b.Dispose();
+        b = new Bitmap(s.Width, s.Height, PixelFormat.Format32bppPArgb);
+    }
+
+    // full: redraw the glass and the content too. Animation frames that only move the light, the wave or the RGB edge
+    // reuse both layers, so a frame stays cheap enough for 144 or 240 Hz.
+    void Render(bool full = true) {
         if (!glass || !IsHandleCreated) return;
         var size = ClientSize;
         if (size.Width <= 0 || size.Height <= 0) return;
-        if (surface.NeedsBuild(size)) BuildGlass();
-        if (buffer == null || buffer.Size != size) {
-            if (buffer != null) buffer.Dispose();
-            buffer = new Bitmap(size.Width, size.Height, PixelFormat.Format32bppArgb);
-        }
-        using (var g = Graphics.FromImage(buffer)) {
-            g.Clear(Color.Transparent);
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            var plate = PlateRect;
-            float r = PlateCorner;
-            using (var path = Ui.RoundRect(plate, r)) {
-                surface.Plate(g, path, plate, surface.Lens, false, 1f);
+        if (surface.NeedsBuild(size)) { BuildGlass(); full = true; }
+        var plate = PlateRect;
+        float r = PlateCorner;
+        if (full || baseLayer == null || baseLayer.Size != size || contentLayer == null) {
+            Fresh(ref baseLayer, size);
+            Fresh(ref contentLayer, size);
+            using (var g = Graphics.FromImage(baseLayer)) {
+                g.Clear(Color.Transparent);
+                Quality(g);
+                using (var path = Ui.RoundRect(plate, r)) surface.Plate(g, path, plate, surface.Lens, false, 1f);
                 PaintGlassInner(g);
+            }
+            using (var g = Graphics.FromImage(contentLayer)) {
+                g.Clear(Color.Transparent);
+                Quality(g);
+                PaintContent(g);
+            }
+        }
+        EnsureDib(size);
+        using (var g = Graphics.FromImage(buffer)) {
+            g.CompositingMode = CompositingMode.SourceCopy;
+            g.DrawImageUnscaled(baseLayer, 0, 0);
+            g.CompositingMode = CompositingMode.SourceOver;
+            Quality(g);
+            using (var path = Ui.RoundRect(plate, r)) {
                 if (GlassCfg.Light) surface.Lighting(g, path, plate, LightRef, LightGain);
                 surface.Edges(g, path, plate, r, false, true, size);
             }
-            PaintContent(g);
+            g.DrawImageUnscaled(contentLayer, 0, 0);
         }
-        Push(buffer);
+        PushDib();
         UpdateHdr();
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct BitmapInfoHeader { public int Size, Width, Height; public short Planes, BitCount; public int Compression, SizeImage, XPels, YPels, ClrUsed, ClrImportant; }
+    [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BitmapInfoHeader bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+    [DllImport("gdi32.dll")] static extern bool GdiFlush();
+    IntPtr dibDc, dib, dibOld;
+
+    // One DIB section for the whole life of the window: GDI+ draws straight into it and UpdateLayeredWindow reads it,
+    // instead of making a new HBITMAP copy every frame.
+    void EnsureDib(Size s) {
+        if (buffer != null && buffer.Size == s) return;
+        FreeDib();
+        var bi = new BitmapInfoHeader { Size = 40, Width = s.Width, Height = -s.Height, Planes = 1, BitCount = 32 };
+        IntPtr screen = GetDC(IntPtr.Zero), bits;
+        dibDc = CreateCompatibleDC(screen);
+        dib = CreateDIBSection(screen, ref bi, 0, out bits, IntPtr.Zero, 0);
+        ReleaseDC(IntPtr.Zero, screen);
+        dibOld = SelectObject(dibDc, dib);
+        buffer = new Bitmap(s.Width, s.Height, s.Width * 4, PixelFormat.Format32bppPArgb, bits);
+    }
+
+    void FreeDib() {
+        if (buffer != null) { buffer.Dispose(); buffer = null; }
+        if (dibDc != IntPtr.Zero) {
+            SelectObject(dibDc, dibOld);
+            DeleteObject(dib);
+            DeleteDC(dibDc);
+            dibDc = IntPtr.Zero;
+        }
+    }
+
+    void PushDib() {
+        GdiFlush();
+        IntPtr screen = GetDC(IntPtr.Zero);
+        try {
+            var size = buffer.Size;
+            var src = Point.Empty;
+            var dst = Location;
+            var blend = new Blend { Op = 0, Flags = 0, Alpha = 255, Format = 1 };
+            UpdateLayeredWindow(Handle, screen, ref dst, ref size, dibDc, ref src, 0, ref blend, 2); // ULW_ALPHA
+        } finally { ReleaseDC(IntPtr.Zero, screen); }
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e) { FreeDib(); base.OnHandleDestroyed(e); }
 
     [StructLayout(LayoutKind.Sequential, Pack = 1)] struct Blend { public byte Op, Flags, Alpha, Format; }
     [DllImport("user32.dll")] static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dst, ref Point ptDst, ref Size size, IntPtr src, ref Point ptSrc, int key, ref Blend blend, int flags);
@@ -1848,24 +2008,6 @@ abstract class DarkPanel : Form {
     [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr dc);
     [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
     [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
-
-    void Push(Bitmap b) {
-        IntPtr screen = GetDC(IntPtr.Zero), mem = CreateCompatibleDC(screen), hb = IntPtr.Zero, old = IntPtr.Zero;
-        try {
-            hb = b.GetHbitmap(Color.FromArgb(0));
-            old = SelectObject(mem, hb);
-            var size = b.Size;
-            var src = Point.Empty;
-            var dst = Location;
-            var blend = new Blend { Op = 0, Flags = 0, Alpha = 255, Format = 1 };
-            UpdateLayeredWindow(Handle, screen, ref dst, ref size, mem, ref src, 0, ref blend, 2); // ULW_ALPHA
-        } finally {
-            if (old != IntPtr.Zero) SelectObject(mem, old);
-            if (hb != IntPtr.Zero) DeleteObject(hb);
-            DeleteDC(mem);
-            ReleaseDC(IntPtr.Zero, screen);
-        }
-    }
 
     protected override void OnPaintBackground(PaintEventArgs e) {
         if (glass) return;
@@ -1959,6 +2101,7 @@ abstract class DarkPanel : Form {
 class Popup : DarkPanel {
     static readonly string[] Labels = { "Eye Care", "Pixel Refresh", L.T("Entrada", "Input") };
     readonly bool[] on = new bool[3];
+    readonly bool[] unavailable = new bool[2]; // the monitor refuses Eye Care / Pixel Refresh over the network
     int hot = -1;
     string title = L.T("Monitor LG", "LG monitor"), sub = "", status = L.T("Conectando…", "Connecting…"), input = "—";
     string screenOff = "—", sleep = "—";
@@ -1985,7 +2128,7 @@ class Popup : DarkPanel {
         base.PaintHdr(g);
         if (!HdrPeak.Buttons) return;
         for (int i = 0; i < 2; i++) {
-            if (!on[i]) continue;
+            if (!on[i] || unavailable[i]) continue;
             var c = Circle(i);
             using (var path = new GraphicsPath()) {
                 path.AddEllipse(c);
@@ -2133,6 +2276,7 @@ class Popup : DarkPanel {
     }
 
     public bool IsOn(int i) { return on[i]; }
+    public void SetUnavailable(int i, bool v) { unavailable[i] = v; Invalidate(); }
     public void SetTimes(string screen, string sl) { screenOff = screen; sleep = sl; Invalidate(); }
     public void SetButton(int i, bool v) { on[i] = v; Invalidate(); }
     public void SetTitle(string t, string s) { title = t; sub = s; Invalidate(); }
@@ -2152,7 +2296,6 @@ class Popup : DarkPanel {
     }
 
     int Hit(Point p) {
-        if (hdr && badge.Contains(p)) return ItemHdr;
         for (int i = 0; i < choices.Count && expanded >= 0; i++) if (Chip(i).Contains(p)) return ChipBase + i;
         for (int i = 0; i < Labels.Length; i++) if (Column(i).Contains(p)) return i;
         foreach (int r in new[] { RowScreen, RowSleep, RowPlan }) if (RowOn(r) && Row(r).Contains(p)) return r;
@@ -2236,7 +2379,6 @@ class Popup : DarkPanel {
         if (value >= 0 && !glass) // the glass bar shows it inside
             Ui.DrawText(g, value + "%", fSmall, new RectangleF(W - pad - Ui.P(50), Ui.P(12), Ui.P(50), Ui.P(24)), Ui.Text2, StringAlignment.Far);
         string s = sub;
-        if (hdr) s += HdrPeak.On ? L.T(" · HDR activo en Windows", " · HDR on in Windows") : L.T(" · efectos HDR apagados", " · HDR effects off");
         if (!connected) s = sub == "" ? status : sub + " · " + status;
         Ui.DrawText(g, s, fSmall, new RectangleF(pad, Ui.P(34), W - 2 * pad, Ui.P(18)), Ui.Text2, StringAlignment.Near);
 
@@ -2251,14 +2393,15 @@ class Popup : DarkPanel {
                 using (var b = new SolidBrush(fill)) g.FillEllipse(b, c);
             } else if (open)
                 using (var b = new SolidBrush(Color.FromArgb(40, 255, 255, 255))) g.FillEllipse(b, c);
-            var ic = on[i] ? Color.FromArgb(28, 28, 30) : Ui.Text;
+            bool na = i < 2 && unavailable[i];
+            var ic = na ? Color.FromArgb(110, 255, 255, 255) : on[i] ? Color.FromArgb(28, 28, 30) : Ui.Text;
             float sz = c.Width * 0.46f;
             if (i == 0) Ui.IconEye(g, center, sz, ic);
             else if (i == 1) Ui.IconPixels(g, center, sz, ic);
             else Ui.IconInput(g, center, sz, ic);
             var col = Column(i);
             Ui.DrawText(g, Labels[i], fLabel, new RectangleF(col.X, c.Bottom + Ui.P(5), col.Width, Ui.P(18)), Ui.Text, StringAlignment.Center);
-            string st = i == 2 ? input : on[i] ? (i == 1 ? L.T("Al apagar", "At power off") : "On") : "Off";
+            string st = i == 2 ? input : (i < 2 && unavailable[i]) ? L.T("No disponible", "Unavailable") : on[i] ? (i == 1 ? L.T("Al apagar", "At power off") : "On") : "Off";
             Ui.DrawText(g, st, fSmall, new RectangleF(col.X, c.Bottom + Ui.P(22), col.Width, Ui.P(16)), Ui.Text2, StringAlignment.Center);
         }
 
@@ -2936,7 +3079,7 @@ class MiniSlider : Control {
 class GlassPreview : Control {
     Bitmap wall;
     readonly GlassSurface surface = new GlassSurface();
-    readonly System.Windows.Forms.Timer anim = new System.Windows.Forms.Timer { Interval = 15 };
+    readonly FrameClock anim = new FrameClock();
     readonly Font font = Ui.F("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9f, FontStyle.Regular);
     int value = 62;
     bool drag;
@@ -3029,7 +3172,7 @@ class GlassPreview : Control {
     }
 
     protected override void Dispose(bool disposing) {
-        if (disposing) { anim.Dispose(); surface.Clear(); if (wall != null) wall.Dispose(); }
+        if (disposing) { anim.Stop(); surface.Clear(); if (wall != null) wall.Dispose(); }
         base.Dispose(disposing);
     }
 }
@@ -3450,6 +3593,9 @@ class App : ApplicationContext {
         popup.SetTitle(cfg.Name == "" ? L.T("Monitor LG", "LG monitor") : cfg.Name, Resolution());
         popup.SetButton(0, cfg.EyeCare);
         popup.SetButton(1, cfg.PixelRefresh);
+        // Known from an earlier try: this monitor doesn't let Eye Care / Pixel Refresh be changed over the network
+        tv.LunaBlocked = cfg.LunaBlocked;
+        if (cfg.LunaBlocked) { popup.SetButton(0, false); popup.SetButton(1, false); popup.SetUnavailable(0, true); popup.SetUnavailable(1, true); }
         RefreshTimes();
         HdrPeak.Refresh();
         popup.SetHdr(HdrPeak.WindowsHdr);
@@ -3465,7 +3611,6 @@ class App : ApplicationContext {
         osd.SliderMoved += v => Want(v, false);
         popup.ButtonClicked += OnButton;
         popup.ChoiceClicked += OnChoice;
-        popup.HdrClicked += delegate { SetHdrEffects(!cfg.HdrPeak); };
 
         tv.BacklightChanged += OnBacklight;
         tv.Disconnected += delegate { Log.Write("connection lost"); lostAt = DateTime.UtcNow; SetStatus(L.T("Sin conexión, reintentando…", "Disconnected, retrying…"), false); };
@@ -3548,9 +3693,6 @@ class App : ApplicationContext {
         foreach (ToolStripItem it in design.DropDownItems) it.ForeColor = Ui.Text;
         ((ToolStripDropDownMenu)design.DropDown).Renderer = new ToolStripProfessionalRenderer(new DarkMenuColors());
         m.Items.Add(design);
-        var hdrItem = new ToolStripMenuItem(L.T("Efectos HDR", "HDR effects"));
-        hdrItem.Click += delegate { SetHdrEffects(!cfg.HdrPeak); };
-        m.Items.Add(hdrItem);
         m.Items.Add(new ToolStripSeparator());
         var start = new ToolStripMenuItem(L.T("Iniciar con Windows", "Start with Windows"));
         start.Click += delegate { SetStartup(!IsStartup()); };
@@ -3568,9 +3710,6 @@ class App : ApplicationContext {
         m.Items.Add(L.T("Salir", "Quit"), null, delegate { Quit(); });
         m.Opening += delegate {
             start.Checked = IsStartup(); win11.Checked = cfg.Design != "glass"; liquid.Checked = cfg.Design == "glass";
-            hdrItem.Checked = cfg.HdrPeak;
-            hdrItem.Enabled = HdrPeak.WindowsHdr;
-            hdrItem.ToolTipText = HdrPeak.WindowsHdr ? null : L.T("Activá el HDR de Windows para usarlos", "Turn on Windows HDR to use them");
         };
         foreach (ToolStripItem it in m.Items) it.ForeColor = Ui.Text;
         return m;
@@ -3808,6 +3947,19 @@ class App : ApplicationContext {
             try {
                 if (i == 0) await tv.SetEyeCare(want);
                 else await tv.SetPixelRefresh(want);
+                popup.SetUnavailable(i, false);
+            } catch (NotSupportedException) {
+                // This firmware only lets brightness, contrast, color, sharpness, picture mode and energy saving be changed
+                Log.Write((i == 0 ? "eye care" : "pixel refresh") + " is not allowed over the network by this monitor");
+                if (tv.LunaBlocked && !cfg.LunaBlocked) {
+                    cfg.LunaBlocked = true;
+                    cfg.Save();
+                    popup.SetButton(1 - i, false);
+                    popup.SetUnavailable(1 - i, true); // the other one goes through the same closed door
+                }
+                popup.SetButton(i, false);
+                popup.SetUnavailable(i, true);
+                return;
             } catch (Exception ex) { error = L.T("No se pudo cambiar: ", "Could not change it: ") + ex.Message; }
         }
         if (error != null) {
