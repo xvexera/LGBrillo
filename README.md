@@ -60,6 +60,7 @@ Tried it on another model? Open an [issue](../../issues) with the model, the web
 - **Brightness per picture mode:** each mode (SDR, HDR, etc.) keeps its own brightness, and LGBrillo changes the one for the active mode.
 - **The on-screen bar can't draw over everything:** Windows keeps the Start menu, its own flyouts and exclusive-fullscreen games above any app window, so the bar stays hidden behind those. The brightness still changes.
 - **Possible flicker:** to change settings, the app opens and instantly closes an invisible alert on the monitor, which may flicker on some models.
+- **webOS 26 firmware (43.21.60+, August 2026):** this update blacklists the signing certificate every webOS remote app has used since 2014, so the old way of pairing stopped working. LGBrillo detects this and pairs again without the signature, with no action needed from you. On that firmware the brightness is set through the same invisible-alert path as Eye Care.
 
 ## Troubleshooting
 

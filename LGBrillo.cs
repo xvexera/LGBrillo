@@ -79,6 +79,7 @@ static class Log {
 class Config {
     public string Ip { get; set; }
     public string Key { get; set; }
+    public bool Unsigned { get; set; } // this monitor's firmware blacklists the signed manifest; pair without it
     public int Paso { get; set; }
     public bool EyeCare { get; set; }
     public bool PixelRefresh { get; set; }
@@ -162,7 +163,32 @@ class Tv {
 
     public bool Connected { get { return ws != null && ws.State == WebSocketState.Open && regTcs != null && regTcs.Task.Status == TaskStatus.RanToCompletion; } }
 
+    // webOS 26+ (firmware 43.21.60, Aug 2026) blacklists the old test-signing certificate every SSAP client has sent
+    // since 2014 and answers the signed manifest with "403 Pairing rejected: blacklisted certificate detected" — before
+    // any prompt and before it even looks at the stored key, so an install that paired years ago just stops working.
+    // Pair again without the signature: the monitor shows its prompt and grants what the manifest declares in the clear.
+    public bool Unsigned;
+
     public async Task ConnectAsync() {
+        bool retry = false;
+        try { await Connect(!Unsigned); }
+        catch (Exception ex) {
+            if (Unsigned || !Blacklisted(ex)) throw;
+            retry = true;
+        }
+        if (retry) {
+            Log.Write("signed manifest blacklisted by the firmware; pairing again without a signature");
+            Unsigned = true;
+            await Connect(false);
+        }
+    }
+
+    static bool Blacklisted(Exception ex) {
+        string m = ex.Message ?? "";
+        return m.IndexOf("blacklist", StringComparison.OrdinalIgnoreCase) >= 0 || m.IndexOf("403", StringComparison.Ordinal) >= 0;
+    }
+
+    async Task Connect(bool signed) {
         Close();
         var s = new ClientWebSocket();
         s.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
@@ -175,7 +201,7 @@ class Tv {
         var loop = ReceiveLoop(s);
 
         var p = new Dictionary<string, object> {
-            { "forcePairing", false }, { "pairingType", "PROMPT" }, { "manifest", Manifest.Get() }
+            { "forcePairing", false }, { "pairingType", "PROMPT" }, { "manifest", Manifest.Get(signed) }
         };
         if (Key != "") p["client-key"] = Key;
         await Send(new Dictionary<string, object> { { "type", "register" }, { "id", "reg0" }, { "payload", p } });
@@ -261,7 +287,7 @@ class Tv {
 
         if (id == "reg0") {
             if (type == "registered") regTcs.TrySetResult(Str(payload, "client-key"));
-            else if (type == "error") regTcs.TrySetException(new Exception(L.T("el monitor rechazó la conexión", "the monitor rejected the connection")));
+            else if (type == "error") regTcs.TrySetException(new Exception(Str(m, "error") ?? L.T("el monitor rechazó la conexión", "the monitor rejected the connection")));
             else if (Str(payload, "pairingType") == "PROMPT") { prompted = true; PromptLater(); }
             return;
         }
@@ -405,10 +431,12 @@ class Tv {
         var prm = new Dictionary<string, object> {
             { "category", category }, { "settings", new Dictionary<string, object> { { key, value } } }
         };
-        Exception official;
-        try { await Request("ssap://settings/setSystemSettings", prm, 4000); return; }
-        catch (Exception ex) { official = ex; }
-        if (!Connected) throw official;
+        // On firmware that accepts the signed manifest the official call is instant and silent. Unsigned (webOS 26+) it
+        // returns 401, so skip it there and go straight to the luna alert trick, which works without elevated permissions.
+        if (!Unsigned) {
+            try { await Request("ssap://settings/setSystemSettings", prm, 4000); return; }
+            catch { if (!Connected) throw; }
+        }
         var act = new Dictionary<string, object> { { "uri", LunaSet }, { "params", prm } };
         Dictionary<string, object> r;
         try {
@@ -464,8 +492,8 @@ class Tv {
 
 // Public manifest of the "LG Remote App" that webOS devices accept.
 static class Manifest {
-    public static Dictionary<string, object> Get() {
-        return new Dictionary<string, object> {
+    public static Dictionary<string, object> Get(bool signed) {
+        var d = new Dictionary<string, object> {
             { "appVersion", "1.1" },
             { "manifestVersion", 1 },
             { "deviceName", "LGBrillo (PC)" },
@@ -497,6 +525,10 @@ static class Manifest {
                 { "serial", "2f930e2d2cfe083771f68e4fe7bb07" },
                 { "vendorId", "com.lge" } } }
         };
+        // Drop the signature blocks for firmware that blacklists the certificate. Unsigned, the monitor still grants
+        // CONTROL_DISPLAY and reading, which covers everything we do (the brightness goes through the luna alert trick).
+        if (!signed) { d.Remove("signatures"); d.Remove("signed"); }
+        return d;
     }
 }
 
@@ -3620,8 +3652,9 @@ class App : ApplicationContext {
         try {
             tv.Ip = ip;
             tv.Key = cfg.Key;
+            tv.Unsigned = cfg.Unsigned;
             await tv.ConnectAsync();
-            if (tv.Key != cfg.Key) { cfg.Key = tv.Key; cfg.Save(); }
+            if (tv.Key != cfg.Key || tv.Unsigned != cfg.Unsigned) { cfg.Key = tv.Key; cfg.Unsigned = tv.Unsigned; cfg.Save(); }
             return true;
         } catch (Exception ex) {
             string msg = L.T("Sin conexión: ", "Not connected: ") + ex.Message;
