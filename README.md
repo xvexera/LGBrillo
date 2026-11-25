@@ -29,7 +29,7 @@ LG monitors with webOS (such as the UltraGear OLED "Smart" line or the MyView se
 
 ## Install
 
-1. Download `LGBrillo.exe` from the latest [release](../../releases). There's nothing to install: it's a single file under 100 KB that uses the .NET Framework already included in Windows 10 and 11.
+1. Download `LGBrillo.exe` from the latest [release](../../releases). There's nothing to install: it's a single file under 200 KB that uses the .NET Framework already included in Windows 10 and 11.
 2. The monitor must be **on and on the same network** as the PC.
 3. Run `LGBrillo.exe`. The first time, the monitor shows a prompt asking for permission: **accept it with the remote** (only once).
 4. Done: the white sun in the tray opens the panel.
